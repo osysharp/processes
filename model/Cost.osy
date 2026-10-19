@@ -1,0 +1,73 @@
+// What a run costs, and what it may: every model call made in a workflow's run is charged to that run by
+// `Osysharp.Llm` itself, and so is every call of the agent work given there — so a run's cost is counted as it
+// happens, by nobody's hand, and a limit for each run holds all of it.
+namespace Osysharp.Processes;
+
+using Osysharp.Llm;
+
+/// ⭐ EACH RUN OF A PROCESS MAY SPEND AT MOST THIS on models, in US dollars — "onboarding may spend two dollars a
+/// supplier". A call that would pass it is refused before it leaves (or steps down to a cheaper model, with
+/// `LlmOnLimit.StepDown`): agent work stops where it stands with what it did, and the process goes on from there as
+/// it does from any step that did not finish.
+///
+///     SetProcessBudget("Onboarding", 2.00m);
+///
+/// It is one of the app's model budgets (`Osysharp.Llm`'s `SetBudget`), for whoever manages what models may spend.
+[Server, Authorize(ManagesModelSpend)]
+public void SetProcessBudget(string workflow, decimal perRun, LlmOnLimit onLimit = LlmOnLimit.Stop) {
+  RequireProcess(workflow);
+  SetBudget(RunKind(workflow), "", LlmBudgetWindow.Total, perRun, onLimit);
+}
+
+/// The same for ONE run — more room for a run that needs it, or less. It overrides the process's own for that run.
+[Server, Authorize(ManagesModelSpend)]
+public void SetRunBudget(ProcessRun run, decimal limit, LlmOnLimit onLimit = LlmOnLimit.Stop) {
+  SetBudget(RunKind(run.Workflow), run.Run.ToString(), LlmBudgetWindow.Total, limit, onLimit);
+}
+
+/// Take the limit off the runs of a process. False when it had none.
+[Server, Authorize(ManagesModelSpend)]
+public bool RemoveProcessBudget(string workflow) { return RemoveBudget(RunKind(workflow), "", LlmBudgetWindow.Total); }
+
+void RequireProcess(string workflow) {
+  if (ProcessOf(workflow) == null) {
+    throw new ValidationException($"'{workflow}' is not one of this app's processes. Name the workflow one where the app is configured: "
+      + "`app.Processes = new ProcessesSetup { Processes = [new MyProcess()] };` — its `Workflow` is the workflow's own name.");
+  }
+}
+
+/// The limit one run is held to, in US dollars: its own when it has one, else the one set for every run of its
+/// process. Null: none.
+public decimal? RunBudgetOf(ProcessRun run) {
+  var kind = RunKind(run.Workflow);
+  var subject = run.Run.ToString();
+  var own = LlmBudget.FirstOrDefault(b => b.Scope == kind && b.Subject == subject && b.Window == LlmBudgetWindow.Total);
+  if (own != null) { return own!.LimitMicros / 1000000m; }
+  var every = LlmBudget.FirstOrDefault(b => b.Scope == kind && b.Subject == "" && b.Window == LlmBudgetWindow.Total);
+  return every == null ? null : every!.LimitMicros / 1000000m;
+}
+
+/// What a run has spent on models, in US dollars: every model call made in it, and every call of the agent work
+/// given in it. Read from the meter; the reader needs `ReadsModelUsage`.
+public decimal RunSpend(ProcessRun run) { return SpentOn(RunScope(run.Workflow, run.Run)); }
+
+/// The same, with every run it started from its own body, and theirs.
+public decimal RunSpendWithStarted(ProcessRun run) {
+  var total = RunSpend(run);
+  foreach (var child in ProcessRun.Where(r => r.Starter == run.Run).ToList()) { total = total + RunSpendWithStarted(child); }
+  return total;
+}
+
+/// What a run has spent and what it may, as whoever is looking may know it.
+public ProcessCost CostOf(ProcessRun run) {
+  var cost = new ProcessCost();
+  var me = Session.CurrentUser;
+  if (me == null || !(Security.Authorize(me, ReadsModelUsage) || Security.Authorize(me, ManagesModelSpend))) { return cost; }
+  cost.Known = true;
+  cost.Spent = RunSpend(run);
+  cost.SpentWithStarted = RunSpendWithStarted(run);
+  cost.Limit = RunBudgetOf(run);
+  cost.Words = cost.Limit == null ? Money(cost.Spent) : Money(cost.Spent) + " of " + Money(cost.Limit!);
+  if (cost.SpentWithStarted > cost.Spent) { cost.Words = cost.Words + " · " + Money(cost.SpentWithStarted) + " with the runs it started"; }
+  return cost;
+}

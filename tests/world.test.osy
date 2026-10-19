@@ -1,0 +1,62 @@
+// The programme office the tests run in: Noor and Idris are programmers, Vera is the festival's director — she
+// alone reads a film under embargo and what the model costs —, Tomas keeps the archive, and Pia is an usher with no
+// business in the office.
+using Osysharp.Identity;
+using Osysharp.Llm;
+using Osysharp.Workflow;
+using Osysharp.Processes;
+using Festival;
+
+[TestFixture]
+void Office() {
+  var noor = new Person { Email = "noor@northlight.example", DisplayName = "Noor Haddad" };
+  var idris = new Person { Email = "idris@northlight.example", DisplayName = "Idris Vale" };
+  var vera = new Person { Email = "vera@northlight.example", DisplayName = "Vera Lindqvist" };
+  var tomas = new Person { Email = "tomas@northlight.example", DisplayName = "Tomas Reyes" };
+  var pia = new Person { Email = "pia@northlight.example", DisplayName = "Pia Sorn" };
+  new RoleGrant { Member = noor, Role = FestivalRole.Programmer };
+  new RoleGrant { Member = idris, Role = FestivalRole.Programmer };
+  new RoleGrant { Member = vera, Role = FestivalRole.Director };
+  new RoleGrant { Member = tomas, Role = FestivalRole.Archivist };
+  new RoleGrant { Member = pia, Role = FestivalRole.Usher };
+}
+
+principal Noor  => Person.Single(p => p.Email == "noor@northlight.example");
+principal Idris => Person.Single(p => p.Email == "idris@northlight.example");
+principal Vera  => Person.Single(p => p.Email == "vera@northlight.example");
+principal Tomas => Person.Single(p => p.Email == "tomas@northlight.example");
+principal Pia   => Person.Single(p => p.Email == "pia@northlight.example");
+
+/// The model writes one line, and says it used 1000 tokens in and 200 out: 0.2 cents.
+void TheModelWritesALine() {
+  ScriptedAnswer.Stub((model, request) => Scripted.Text("Two sisters drive a salt truck across a drying lake.", 1000, 200));
+}
+
+/// Take a film in and let its process run as far as it goes by itself. Answers the film's id.
+Guid Submitted(string title, string by, bool embargoed = false) {
+  var film = Submit(title, by, "A road film.", embargoed);
+  Workflow.Settle(film);
+  return film.Id;
+}
+
+/// The kit's row for a film's submission, and for the clearance of its music.
+ProcessRun RunOf(Guid film) { return ProcessRunAbout("Submission", film)!; }
+ProcessRun ClearanceRunOf(Guid film) {
+  var clearance = Clearance.Single(c => c.Film.Id == film);
+  return ProcessRunAbout("MusicRights", clearance.Id)!;
+}
+
+/// A programmer watches a film, and the process goes on.
+void WatchedAndSettled(Guid film, bool wanted) {
+  var f = Film.Single(x => x.Id == film);
+  Watched(f, wanted);
+  Workflow.Settle(f);
+}
+
+/// The rights office answers, and both processes go on.
+void RightsAnsweredAndSettled(Guid film, bool cleared) {
+  var clearance = Clearance.Single(c => c.Film.Id == film);
+  RightsAnswered(clearance, cleared);
+  Workflow.Settle(clearance);
+  Workflow.Settle(Film.Single(x => x.Id == film));
+}

@@ -1,0 +1,59 @@
+// The programme office's two screens: every run, and one run.
+namespace Festival;
+
+using Osysharp.Identity;
+using Osysharp.Processes;
+
+[Layout]
+component OfficeFrame() {
+  live var me = Session.CurrentUser;
+  live var myName = me == null ? "" : me.DisplayName;
+  action SignOut() { Session.SignOut(); }
+  action Appearance() { Theme.Toggle(); }
+  render {
+    TabbedShell(new AppChrome {
+      Product = "Northlight",
+      Tagline = "Programme office",
+      Mark = Icons.Building,
+      Home = "/",
+      User = new ShellUser {
+        Name = myName, Initials = InitialsOf(myName == "" ? "?" : myName),
+        Menu = [
+          new MenuAction { Label = "Appearance", Icon = Icons.Eye, OnPress = Appearance },
+          new MenuAction { Label = "Sign out", Icon = Icons.Logout, OnPress = SignOut, Tone = Tone.Danger, Divided = true },
+        ],
+      },
+      Nav = [ new NavItem { Label = "Submissions", To = "/", Icon = Icons.Home, Exact = true } ],
+    }) {
+      Outlet();
+    }
+  }
+}
+
+string InitialsOf(string name) {
+  var initials = "";
+  foreach (var part in name.Split(" ")) { if (part != "" && initials.Length < 2) { initials = initials + part.Substring(0, 1).ToUpper(); } }
+  return initials;
+}
+
+/// Every run of the festival's processes.
+[Route("/")] [Layout(OfficeFrame)] [Authorize(FollowsProcesses)] [Render(CSR)] [Title("Submissions")]
+component RunsPage() {
+  render {
+    Stack(gap: 6, px: 5, py: 6, w: "100%", maxW: "980px", mx: "auto") {
+      PageHead("Submissions", subtitle: "Every film on its way into the programme, and the clearances it waits for.");
+      ProcessRuns();
+    }
+  }
+}
+
+/// One run, from its first state to where it is.
+[Route("/runs/{run}")] [Layout(OfficeFrame)] [Authorize(FollowsProcesses)] [Render(CSR)] [Title("A submission")]
+component RunPage(Guid run) {
+  render {
+    Stack(gap: 5, px: 5, py: 6, w: "100%", maxW: "980px", mx: "auto") {
+      Row { TextLink("All submissions", to: "/"); }
+      ProcessRunInspector(run);
+    }
+  }
+}

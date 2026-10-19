@@ -1,0 +1,98 @@
+// What the app says: which of its workflows are processes, and who follows them.
+namespace Osysharp.Processes;
+
+using Osysharp.Workflow;
+
+/// Who opens the list of process runs and a run's page. Nobody, until the app says:
+/// `policy FollowsProcesses => IsOperations;`. What a run is ABOUT is still read through the app's own rules for that
+/// row: following processes shows that a run exists, where it is and what it cost — never a row the reader may not read.
+virtual policy FollowsProcesses => false;
+
+
+/// ⭐ A PROCESS: one of the app's workflows, named for the people who follow it. Write `Process<T>` — this is what
+/// the kit holds each one as.
+public class ProcessBase {
+  /// What people call it: "Supplier onboarding".
+  public virtual string Name => "";
+  /// The workflow, by its own name — what `workflow Onboarding { … }` declares.
+  public virtual string Workflow => "";
+  /// What it is for, in a sentence. Shown under its name.
+  public virtual string Purpose => "";
+  /// Its shape — `Onboarding.Graph`. What a run is drawn on.
+  public virtual WorkflowGraph Graph => new WorkflowGraph();
+  /// How long a run may sit in one state before the list calls it stuck and the app is told (`ProcessStuck`).
+  /// Null: never by time alone.
+  public virtual TimeSpan? StuckAfter => null;
+
+  /// What the run about `item` is called, as whoever is looking may read it. Null: the row is not theirs to read.
+  public virtual string? TitleOfId(Guid item) { return null; }
+  /// What happened to the run about `item`, oldest first.
+  public virtual List<WorkflowAuditEntry> HistoryOfId(Guid item) { return []; }
+}
+
+/// ⭐ A PROCESS OVER ONE KIND OF ROW — the row its workflow tracks.
+///
+///     /// Taking a new supplier on.
+///     public class TakingOn : Process<Supplier> {
+///       public override string Name => "Supplier onboarding";
+///       public override string Workflow => "Onboarding";
+///       public override WorkflowGraph Graph => Onboarding.Graph;
+///       public override string TitleOf(Supplier s) => s.Name;
+///       public override List<WorkflowAuditEntry> HistoryOf(Supplier s) => Onboarding.For(s).Audit;
+///     }
+///
+/// `TitleOf` and `HistoryOf` are run as whoever is looking, so they answer what that person may read.
+public class Process<T> : ProcessBase {
+  /// What a run is called in a list: the row's own name — "Brightwater Mills".
+  public virtual string TitleOf(T item) { return ""; }
+  /// The run's own history: `Onboarding.For(item).Audit`.
+  public virtual List<WorkflowAuditEntry> HistoryOf(T item) { return []; }
+
+  /// The row a run is about, when whoever is looking may read it.
+  public T? Find(Guid item) { return T.FirstOrDefault(x => x.Id == item); }
+
+  public override string? TitleOfId(Guid item) {
+    var row = Find(item);
+    return row == null ? null : TitleOf(row!);
+  }
+  public override List<WorkflowAuditEntry> HistoryOfId(Guid item) {
+    var row = Find(item);
+    return row == null ? [] : HistoryOf(row!);
+  }
+}
+
+/// How this app follows its processes —
+/// `app.Processes = new ProcessesSetup { Processes = [new TakingOn()], RunPage = "/processes/{run}" };`.
+[AppSetting("Processes")]
+public class ProcessesSetup {
+  /// Every process the app has.
+  public List<ProcessBase> Processes = [];
+  /// Where the app shows one run — the route it draws `ProcessRunInspector` on, with `{run}` where the run's id goes:
+  /// "/processes/{run}". "": the list links nowhere, and tells the page which run was opened (`opened:`).
+  public string RunPage = "";
+  /// How often the kit asks which runs are stuck, to tell the app of each (`ProcessStuck`). Zero: never — the list
+  /// still marks them, and nothing is raised.
+  public TimeSpan StuckCheckEvery = TimeSpan.FromMinutes(30);
+}
+
+/// The process a workflow is, by the workflow's name. Null: the app has not named it one.
+public ProcessBase? ProcessOf(string workflow) {
+  foreach (var p in App.Setting<ProcessesSetup>().Processes) { if (p.Workflow == workflow) { return p; } }
+  return null;
+}
+
+/// Where the app shows a run: its page's address, or "" when the app has said none.
+public string RunPageOf(Guid run) {
+  var page = App.Setting<ProcessesSetup>().RunPage;
+  return page == "" ? "" : page.Replace("{run}", run.ToString());
+}
+
+/// A workflow's or a state's name as words: "TakingOn" → "Taking on".
+public string Worded(string name) {
+  var words = "";
+  foreach (var c in name) {
+    if (char.IsUpper(c) && words != "") { words = words + " " + char.ToLower(c); }
+    else { words = words + c; }
+  }
+  return words;
+}

@@ -1,0 +1,352 @@
+// One run, for somebody who was not there: where it is, the path it took, each state it was in and for how long,
+// what happened there, what it cost and what it started.
+namespace Osysharp.Processes;
+
+using Osysharp.Workflow;
+using Osysharp.Diagrams;
+using Osysharp.Ui;
+
+/// ⭐ WHAT A LINE OF A RUN IS ABOUT, OPENED IN PLACE. A kit that records its own steps on a run (`NoteOnProcessRun`,
+/// with a `SubjectKind` and a `Subject`) contributes what opening one shows — `Osysharp.Agents.Processes` shows an
+/// agent's piece of work for the kind "AgentTask". A contribution draws nothing for a kind that is not its own.
+[Slot] public abstract component ProcessMomentPanel(string kind, Guid subject);
+
+/// ⭐ MORE ABOUT A RUN, under its history — a section each from the kits that know something of it.
+[Slot] public abstract component ProcessRunPanel(Guid run);
+
+/// A state's type on the picture is how it ends a run: "" for a state a run passes through — a way in and a way
+/// out — and `Success`, `Cancel` or `Error` for one it ends at, which has no way out.
+FlowNodeType[] StateTypes() {
+  return [
+    new FlowNodeType { Name = "State", Ports = [
+      new FlowPort { Id = "in", Kind = "target", Side = "left" },
+      new FlowPort { Id = "out", Kind = "source", Side = "right" } ] },
+    new FlowNodeType { Name = "Success", Ports = [ new FlowPort { Id = "in", Kind = "target", Side = "left" } ] },
+    new FlowNodeType { Name = "Cancel", Ports = [ new FlowPort { Id = "in", Kind = "target", Side = "left" } ] },
+    new FlowNodeType { Name = "Error", Ports = [ new FlowPort { Id = "in", Kind = "target", Side = "left" } ] },
+  ];
+}
+
+Tone ToneOfMoment(ProcessNoteTone tone) {
+  return tone == ProcessNoteTone.Done ? Tone.Success : tone == ProcessNoteTone.Problem ? Tone.Danger : tone == ProcessNoteTone.Waiting ? Tone.Warning : Tone.Ghost;
+}
+
+/// One thing that happened, as a line under the state it happened in. A line that names what it is about opens it
+/// in place.
+[Composable]
+public component ProcessMomentLine(ProcessMoment moment) {
+  bool open = false;
+  action Toggle() { open = !open; }
+  render {
+    Stack(gap: 2, py: 2) {
+      Row(gap: 3, align: Align.Start) {
+        Box(w: "8px", h: "8px", mt: "0.45rem", rounded: Radius.Circle, shrink: 0,
+            bg: moment.Tone == ProcessNoteTone.Done ? Colors.Success.Default : moment.Tone == ProcessNoteTone.Problem ? Colors.Danger.Default
+              : moment.Tone == ProcessNoteTone.Waiting ? Colors.Warning.Default : Colors.Border);
+        Stack(gap: 1, grow: 1, minW: "0") {
+          if (moment.Tone == ProcessNoteTone.Problem) { Text(moment.Said, fontSize: FontSize.Body, lineHeight: "1.5", maxW: "68ch", color: Colors.Danger.Text); }
+          if (moment.Tone != ProcessNoteTone.Problem) { Text(moment.Said, fontSize: FontSize.Body, lineHeight: "1.5", maxW: "68ch"); }
+          Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap) {
+            Text(moment.When, fontSize: FontSize.Caption, color: Colors.TextMuted);
+            if (moment.Tone != ProcessNoteTone.Plain) { Badge(moment.Tone.Label, tone: ToneOfMoment(moment.Tone)); }
+            if (moment.Subject != null) { Button(open ? "Close" : "Open", onPress: Toggle, size: Size.Sm, tone: Tone.Ghost, announceAs: (open ? "Close: " : "Open: ") + moment.Said); }
+          }
+        }
+      }
+      if (open && moment.Subject != null) {
+        Stack(gap: 0, ml: 5, pl: 4, borderLW: 2, border: Colors.Border, label: "Opened step") {
+          ProcessMomentPanel(moment.SubjectKind, moment.Subject!);
+        }
+      }
+    }
+  }
+}
+
+/// Tells its page when what the kit keeps of a run changes — the engine said it moved or ended, or a line was said
+/// about it — so the page reads the run again. It draws nothing. (A reaction may not write its own component's
+/// state; it tells the page, whose action does.)
+[Composable]
+component ProcessRunWatch(Guid run, Action<string> changed) {
+  live var following = ProcessRun.Where(r => r.Id == run).ToList();
+  live var lines = ProcessNote.Count(n => n.Run.Id == run);
+  live var stands = (following.Count == 0 ? "" : following[0].State + " " + following[0].Standing.Name + " " + following[0].ChangedAt.ToString()) + " " + lines.ToString();
+  on change { changed(stands); }
+  render { }
+}
+
+/// A process with more states than a row can show legibly: its picture flows downwards, in a tall box beside the
+/// history, instead of being fitted into one line.
+public bool IsLongProcess(ProcessRunView view) { return view.States.Count > 8; }
+
+/// A way out that every state has — `on Withdraw { goto Withdrawn; }` written once for the whole workflow.
+public class ProcessWayOut {
+  public string Trigger = "";
+  public string To = "";
+  public string ToLabel = "";
+}
+
+/// The ways out that (nearly) every state of the process has: one trigger, one state it leads to, from at least four
+/// states and at least half of those a run can leave.
+public List<ProcessWayOut> WaysOutOfAnyState(ProcessRunView view) {
+  List<ProcessWayOut> found = [];
+  var leavable = view.States.Count(s => !s.IsTerminal);
+  foreach (var t in view.Transitions) {
+    if (found.Any(f => f.Trigger == t.Trigger && f.To == t.To)) { continue; }
+    var from = view.Transitions.Count(x => x.Trigger == t.Trigger && x.To == t.To);
+    if (from >= 4 && from * 2 >= leavable) {
+      found.Add(new ProcessWayOut { Trigger = t.Trigger, To = t.To, ToLabel = LabelOf(view.States, t.To) });
+    }
+  }
+  return found;
+}
+
+/// The transitions the picture draws: all of them — except the ways out that every state has, of which only the one
+/// the run took (if it took one) is drawn. Twelve lines to "Called off" say nothing a sentence under the picture
+/// does not, and bury the way the run went. A transition a state's own body makes when it has done its work is
+/// drawn without a word on it: "enter" on every arrow names the mechanism, not what happened.
+public List<WorkflowTransitionInfo> PictureTransitions(ProcessRunView view) {
+  var anywhere = WaysOutOfAnyState(view);
+  List<WorkflowTransitionInfo> drawn = [];
+  foreach (var t in view.Transitions) {
+    if (anywhere.Any(a => a.Trigger == t.Trigger && a.To == t.To)) {
+      // Taken: the run was at `From` and its next state was `To`.
+      var taken = false;
+      for (var k = 0; k + 1 < view.Stays.Count; k = k + 1) {
+        if (view.Stays[k].State == t.From && view.Stays[k + 1].State == t.To) { taken = true; }
+      }
+      if (!taken) { continue; }
+    }
+    drawn.Add(new WorkflowTransitionInfo { Id = t.Id, From = t.From, To = t.To, Trigger = t.Trigger == "enter" ? "" : Worded(t.Trigger), Kind = t.Kind, Guard = t.Guard });
+  }
+  return drawn;
+}
+
+/// How tall the picture of a long process is drawn: a rank for every state, so each is read at its own size.
+public string TallPictureHeight(ProcessRunView view) { return (view.States.Count(s => !s.IsTerminal) * 84 + 40).ToString() + "px"; }
+
+/// The picture of a run: every state of its process, where the run is, and the path it took. `tall`: flowing
+/// downwards in a tall box — for a long process, beside its history.
+[Composable]
+public component ProcessRunPicture(ProcessRunView view, bool tall = false) {
+  live var anywhere = WaysOutOfAnyState(view);
+  render {
+    Stack(gap: 2, w: "100%") {
+      Box(h: tall ? TallPictureHeight(view) : "360px", w: "100%", bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden, label: "Where it is") {
+        FlowCanvas(
+          nodes: view.States, edges: PictureTransitions(view), nodeTypes: StateTypes(), typeField: "Outcome",
+          sourceField: "From", targetField: "To", labelField: "Label", edgeLabelField: "Trigger",
+          readOnly: true, autoLayout: always, layoutDirection: tall ? "down" : "auto", background: none, controls: true,
+          // The way the run went, in order; where it IS, only while it is running; where it failed, when it did.
+          path: view.Stays.Select(s => s.State).ToList(),
+          visited: view.Visited,
+          highlighted: view.Card.Status == ProcessStatus.Running ? [view.Card.State] : [],
+          failed: view.Card.Status == ProcessStatus.Failed ? [view.Card.State] : []
+        ) { s =>
+          Stack(gap: 0, px: 3, py: 2, minW: "112px", maxW: "152px", justify: Justify.Center, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: s.IsTerminal ? Radius.Pill : Radius.Md) {
+            Text(s.Label, fontSize: FontSize.Label, fontWeight: FontWeight.Semibold, lineHeight: "1.3");
+            Text(s.IsInitial ? "starts here" : s.Outcome == "Success" ? "ends well" : s.Outcome == "Cancel" ? "ends stopped" : s.Outcome == "Error" ? "ends failed" : "",
+                 fontSize: FontSize.Caption, color: Colors.TextMuted);
+          }
+        }
+      }
+      foreach (var way in anywhere) {
+        Text("From any state: " + Worded(way.Trigger).ToLower() + " leads to " + way.ToLabel + ".", fontSize: FontSize.Caption, color: Colors.TextMuted, label: "From any state");
+      }
+    }
+  }
+}
+
+/// What happened to a run: each state it was in, in order, when it got there and how long it stayed, with what
+/// happened there — narrowed to the whole run, the steps other kits recorded, or what went wrong.
+[Composable]
+public component ProcessRunHistory(ProcessRunView view) {
+  string only = "";
+  action Everything() { only = ""; }
+  action Steps() { only = "steps"; }
+  action Problems() { only = "problems"; }
+  render {
+    Stack(gap: 3, label: "What happened") {
+      Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap) {
+        Text("What happened", fontSize: FontSize.Subhead, fontWeight: FontWeight.Semibold);
+        Spacer();
+        Tabs {
+          Tab("The whole run", selected: only == "", onPress: Everything);
+          Tab("Steps", selected: only == "steps", onPress: Steps);
+          Tab("Problems", selected: only == "problems", onPress: Problems);
+        }
+      }
+      Stack(gap: 0) {
+        foreach (var stay in view.Stays) {
+          Row(gap: 4, align: Align.Start, py: 3, borderTW: stay.Number == 1 ? 0 : 1, border: Colors.Border, label: "State " + stay.Number.ToString() + ", " + stay.Label) {
+            Text(stay.Number.ToString(), fontSize: FontSize.Label, color: Colors.TextMuted, fontFamily: Font.Mono, minW: "1.5rem", pt: "0.15rem");
+            Stack(gap: 1, grow: 1, minW: "0") {
+              Row(gap: 3, align: Align.Baseline, wrap: Wrapping.Wrap) {
+                Text(stay.Label, fontSize: FontSize.Body, fontWeight: FontWeight.Semibold);
+                if (stay.Current) { Badge("Now", tone: Tone.Primary); }
+                Spacer();
+                Text(stay.Entered + (stay.Lasted == "" ? "" : stay.Current ? " · " + stay.Lasted + " so far" : " · " + stay.Lasted),
+                     fontSize: FontSize.Caption, color: Colors.TextMuted);
+              }
+              foreach (var m in stay.Moments) {
+                if (Shown(m, only)) { ProcessMomentLine(m); }
+              }
+              if (stay.Moments.Count(m => Shown(m, only)) == 0) {
+                Text(only == "" ? "Nothing was recorded here." : only == "steps" ? "No step was recorded here." : "No problem here.", fontSize: FontSize.Label, color: Colors.TextMuted, py: 1);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// ⭐ ONE RUN, READ FROM START TO NOW — what a person who was not there needs: what it is about and where it stands;
+/// the picture; each state it was in, when it got there and how long it stayed, with what happened there in order;
+/// what it has spent on models against what it may; the run that started it and the runs it started.
+///
+///     [Route("/processes/{run}")] component RunPage(Guid run) { render { ProcessRunInspector(run); } }
+///
+/// `run` is the id the list links with (`ProcessRunCard.Id`). It changes nothing. Whoever follows processes may open
+/// it; what the run is about is shown only to a reader who may read that row.
+///
+/// In a test: `Assert.Visible("Being watched", within: "Where it stands")`, `Ui.Click("Problems")`,
+/// `Ui.Click("Open")`.
+[Composable]
+public component ProcessRunInspector(Guid run) {
+  ProcessRunView? view = null;
+  bool loaded = false;
+  string problem = "";
+
+  action Load() {
+    try { view = ProcessRunOf(run); problem = ""; } catch (Exception ex) { problem = ex.Message; }
+    loaded = true;
+  }
+  on mount { Load(); }
+  // The page follows the run: when the engine says it moved or ended, or a line is said about it, the run is read
+  // again, as whoever is looking (`ProcessRunWatch`).
+  string shown = "";
+  action Follow(string now) {
+    if (now == shown) { return; }
+    var before = shown;
+    shown = now;
+    // The first word is what the page was opened on; every later one is news.
+    if (before != "") { Load(); }
+  }
+
+  render {
+    Stack(gap: 6, w: "100%", maxW: "920px", label: "Process run") {
+      ProcessRunWatch(run, Follow);
+      if (!loaded) {
+        Stack(gap: 4, label: "Loading the run") {
+          Skeleton(SkeletonShape.HalfLine);
+          Skeleton(SkeletonShape.Block);
+          Stack(gap: 2) { Skeleton(); Skeleton(); Skeleton(SkeletonShape.HalfLine); }
+        }
+      }
+      if (loaded && problem != "") { Alert("This run could not be shown: " + problem, tone: Tone.Danger); }
+      if (loaded && problem == "" && view == null) {
+        EmptyState("There is no such run", body: "It may have been deleted, or the link is not to a run of this app.");
+      }
+      if (view != null) {
+        // Where it stands: the one thing on the page that is big.
+        Stack(gap: 3, label: "Where it stands") {
+          Text(view.Card.Process, fontSize: FontSize.Label, color: Colors.TextMuted);
+          if (view.Card.Readable) {
+            Text(view.Card.Title == "" ? view.Card.Process : view.Card.Title, fontSize: FontSize.Heading, fontWeight: FontWeight.Semibold, letterSpacing: "-0.015em", lineHeight: "1.2");
+            Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap) {
+              Badge(view.Card.Status.Label, tone: ToneOfStatus(view.Card.Status));
+              if (view.Card.StateLabel != "") { Text((view.Card.Status == ProcessStatus.Running ? "at " : "ended at ") + view.Card.StateLabel, fontSize: FontSize.Body, fontWeight: FontWeight.Medium); }
+            }
+            if (view.Purpose != "") { Text(view.Purpose, fontSize: FontSize.Body, color: Colors.TextSecondary, lineHeight: "1.5", maxW: "62ch"); }
+          }
+          if (!view.Card.Readable) {
+            Text("This run is about something that is not yours to see", fontSize: FontSize.Subhead, fontWeight: FontWeight.Semibold);
+            Text("You follow this process, and may not read the record this run is about — so its name, where it stands and what happened to it stay with those who may.", fontSize: FontSize.Body, color: Colors.TextSecondary, lineHeight: "1.5", maxW: "62ch");
+          }
+          if (view.Card.Stuck) { Alert(view.Card.StuckWhy, title: "Stuck", tone: Tone.Danger); }
+        }
+
+        Row(gap: 6, wrap: Wrapping.Wrap, align: Align.Start, label: "In figures") {
+          Stack(gap: 1, minW: "9rem") {
+            Text(view.Card.Readable ? "Started" : "First seen", fontSize: FontSize.Caption, color: Colors.TextMuted);
+            Text(view.Card.Started, fontSize: FontSize.Body, fontWeight: FontWeight.Medium);
+          }
+          Stack(gap: 1, minW: "9rem") {
+            Text(view.Card.Status == ProcessStatus.Running ? "Running for" : "Ran for", fontSize: FontSize.Caption, color: Colors.TextMuted);
+            Text(view.Card.Age, fontSize: FontSize.Body, fontWeight: FontWeight.Medium);
+          }
+          if (view.Card.InState != "" && view.Card.Readable) {
+            Stack(gap: 1, minW: "9rem") {
+              Text("Where it is, for", fontSize: FontSize.Caption, color: Colors.TextMuted);
+              Text(view.Card.InState, fontSize: FontSize.Body, fontWeight: FontWeight.Medium);
+            }
+          }
+          if (view.Cost.Known) {
+            Stack(gap: 1, minW: "11rem", label: "Spent on models") {
+              Text("Spent on models", fontSize: FontSize.Caption, color: Colors.TextMuted);
+              Text(view.Cost.Words, fontSize: FontSize.Body, fontWeight: FontWeight.Medium, fontFamily: Font.Mono);
+              if (view.Cost.Limit != null && view.Cost.Limit! > 0) {
+                Box(w: "11rem", pt: 1) {
+                  ProgressBar(percent: PercentOf(view.Cost.Spent, view.Cost.Limit!), tone: view.Cost.Spent >= view.Cost.Limit! ? Tone.Danger : Tone.Primary, label: "Spent on models");
+                }
+              }
+            }
+          }
+        }
+
+        // A short process: the picture across the page, the history under it. A long one: the picture flows down,
+        // and — where there is room — stands beside the history.
+        if (view.Card.Readable && view.States.Count > 0 && !IsLongProcess(view)) { ProcessRunPicture(view); }
+        if (view.Card.Readable && !(view.States.Count > 0 && IsLongProcess(view))) { ProcessRunHistory(view); }
+        if (view.Card.Readable && view.States.Count > 0 && IsLongProcess(view)) {
+          if (Layout.AtLeast(Tablet)) {
+            Row(gap: 6, align: Align.Start) {
+              Box(w: "420px", shrink: 0) { ProcessRunPicture(view, tall: true); }
+              Stack(grow: 1, minW: "0") { ProcessRunHistory(view); }
+            }
+          }
+          if (!Layout.AtLeast(Tablet)) {
+            ProcessRunPicture(view, tall: true);
+            ProcessRunHistory(view);
+          }
+        }
+
+        ProcessRunPanel(view.Card.Id);
+
+        if (view.StartedBy != null || view.Started.Count > 0) {
+          Stack(gap: 2, label: "Runs around it") {
+            Text("Runs around it", fontSize: FontSize.Subhead, fontWeight: FontWeight.Semibold);
+            Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg) {
+              if (view.StartedBy != null) {
+                Stack(gap: 0, label: "Started by") {
+                  Text("Started by", fontSize: FontSize.Caption, color: Colors.TextMuted, px: 4, pt: 3);
+                  ProcessRunLine(view.StartedBy!);
+                }
+              }
+              if (view.Started.Count > 0) {
+                Stack(gap: 0, label: "It started") {
+                  Text("It started", fontSize: FontSize.Caption, color: Colors.TextMuted, px: 4, pt: 3);
+                  foreach (var child in view.Started) { ProcessRunLine(child); }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// Whether a line is among those the reader asked for.
+bool Shown(ProcessMoment moment, string only) {
+  if (only == "steps") { return moment.Subject != null; }
+  if (only == "problems") { return moment.Tone == ProcessNoteTone.Problem; }
+  return true;
+}
+
+int PercentOf(decimal spent, decimal limit) {
+  if (limit <= 0) { return 0; }
+  var percent = (int)Math.Round(spent / limit * 100m);
+  return percent > 100 ? 100 : percent < 0 ? 0 : percent;
+}

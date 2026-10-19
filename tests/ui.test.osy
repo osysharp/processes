@@ -1,0 +1,203 @@
+// Osysharp.Processes — on screen, driven as the people of the programme office: a programmer finds a run in the
+// list, narrows the list to what is stuck, opens a run and reads it from its first state to where it is; the
+// director sees what it cost; a run about a film under embargo shows a programmer that it exists and nothing more.
+// `osy test --pixels` photographs each stage — wide and on a phone, light and dark (`Ui.Shot`).
+using Osysharp.Identity;
+using Osysharp.Llm;
+using Osysharp.Workflow;
+using Osysharp.Processes;
+using Festival;
+
+/// The office on the ninth of May: "Low Tide" has waited six days for a programmer, "Salt Road" was watched after a
+/// day and waits for the rights office, and "Paper Kites" was declined.
+Guid AWeekAtTheOffice() {
+  TestClock.Set(new DateTime(2031, 5, 3, 9, 0, 0, DateTimeKind.Utc));
+  TheModelWritesALine();
+  Guid salt = Guid.Empty;
+  runas (Noor) { Submitted("Low Tide", "Mirela Costin"); }
+  TestClock.Advance(TimeSpan.FromDays(4));
+  runas (Noor) { salt = Submitted("Salt Road", "Ana Quiroga"); Submitted("Paper Kites", "Jun Okada"); }
+  TestClock.Advance(TimeSpan.FromHours(26));
+  runas (Idris) {
+    WatchedAndSettled(salt, true);
+    WatchedAndSettled(Film.Single(f => f.Title == "Paper Kites").Id, false);
+  }
+  TestClock.Advance(TimeSpan.FromHours(22));
+  return salt;
+}
+
+[Test(Office)]
+void a_programmer_finds_a_run_in_the_list_and_reads_it_to_where_it_is() {
+  var salt = AWeekAtTheOffice();
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Noor);
+  Ui.Visit("/");
+
+  // Every run, newest first: where each is, how long it has run, and what is stuck.
+  Assert.Visible("Salt Road", within: "Runs");
+  Assert.Visible("Clearing the music", within: "Salt Road");
+  Assert.Visible("Being watched", within: "Low Tide");
+  Assert.Visible("It has been at Being watched for 6 days.", within: "Low Tide");
+  Assert.Visible("Declined", within: "Paper Kites");
+  Assert.Visible("Music of Salt Road", within: "Runs");
+  // A programmer is not told what the model cost.
+  Assert.Hidden("$0.0020");
+  Assert.NoOverflow();
+  Ui.Shot("runs-wide-light");
+
+  // Narrowed to what is stuck, to one process, and by a word of the title.
+  Ui.Click("Stuck");
+  Assert.Visible("Low Tide", within: "Runs");
+  Assert.Hidden("Salt Road");
+  Ui.Click("Ended");
+  Assert.Visible("Paper Kites", within: "Runs");
+  Assert.Hidden("Low Tide");
+  Ui.Click("All");
+  Ui.Click("Music clearance");
+  Assert.Visible("Music of Salt Road", within: "Runs");
+  Assert.Hidden("Low Tide");
+  Ui.Click("Every process");
+  Ui.Fill("Search runs", "kites");
+  Assert.Visible("Paper Kites", within: "Runs");
+  Assert.Hidden("Low Tide");
+  Ui.Fill("Search runs", "no such film");
+  Assert.Visible("No run matches");
+  Ui.Fill("Search runs", "");
+
+  // One run, from its first state to where it is.
+  Ui.Click("Salt Road");
+  Assert.Visible("Salt Road", within: "Where it stands");
+  Assert.Visible("Film submission", within: "Where it stands");
+  Assert.Visible("Running", within: "Where it stands");
+  Assert.Visible("at Clearing the music", within: "Where it stands");
+  Assert.Visible("7 May 2031, 09:00", within: "In figures");
+  Assert.Visible("2 days", within: "In figures");
+  Assert.Probe("FlowCanvas", "nodes", 6);
+  Assert.Visible("Wrote the synopsis from the pitch.", within: "State 1, Submitted");
+  Assert.Visible("Waiting for a programmer to watch it.", within: "State 2, Being watched");
+  Assert.Visible("Idris Vale answered the verdict step.", within: "State 2, Being watched");
+  Assert.Visible("1 day 2 hours", within: "State 2, Being watched");
+  Assert.Visible("Asked the rights office to clear the music.", within: "State 3, Clearing the music");
+  Assert.Visible("Now", within: "State 3, Clearing the music");
+  Assert.Visible("22 hours so far", within: "State 3, Clearing the music");
+  // The run it started is one click away.
+  Assert.Visible("Music of Salt Road", within: "It started");
+  Assert.Hidden("Spent on models");
+  Assert.NoOverflow();
+  Ui.Shot("run-wide-light");
+  Ui.Theme("dark");
+  Ui.Shot("run-wide-dark");
+  Ui.Theme("light");
+
+  // Only what went wrong: nothing has, here.
+  Ui.Click("Problems");
+  Assert.Hidden("Wrote the synopsis from the pitch.");
+  Assert.Visible("No problem here.", within: "State 1, Submitted");
+  Ui.Click("The whole run");
+
+  Ui.Click("Music of Salt Road");
+  Assert.Visible("Music clearance", within: "Where it stands");
+  Assert.Visible("Waiting for the rights office.", within: "State 1, Asked");
+  Assert.Visible("Salt Road", within: "Started by");
+
+  // The same run on a phone.
+  Ui.Viewport(390, 844);
+  Ui.Visit("/runs/" + RunOf(salt).Id.ToString());
+  Assert.Visible("at Clearing the music", within: "Where it stands");
+  Assert.Visible("Asked the rights office to clear the music.", within: "State 3, Clearing the music");
+  Assert.NoOverflow();
+  Ui.Shot("run-phone-light");
+  Ui.Theme("dark");
+  Ui.Shot("run-phone-dark");
+  Ui.Theme("light");
+  Ui.Visit("/");
+  Assert.Visible("Salt Road", within: "Runs");
+  Assert.NoOverflow();
+  Ui.Shot("runs-phone-light");
+}
+
+[Test(Office)]
+void the_director_sees_what_a_run_spent_against_what_it_may() {
+  var salt = AWeekAtTheOffice();
+  runas (Vera) { SetProcessBudget("Submission", 0.01m); UnitOfWork.Commit(); }
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Vera);
+  Ui.Visit("/");
+  Assert.Visible("$0.0020 of $0.01", within: "Salt Road");
+  Ui.Click("Salt Road");
+  Assert.Visible("$0.0020 of $0.01", within: "Spent on models");
+  Assert.NoOverflow();
+  Ui.Shot("run-cost-wide-light");
+}
+
+[Test(Office)]
+void a_run_about_a_film_under_embargo_tells_a_programmer_that_it_exists_and_no_more() {
+  TestClock.Set(new DateTime(2031, 5, 3, 9, 0, 0, DateTimeKind.Utc));
+  TheModelWritesALine();
+  Guid film = Guid.Empty;
+  runas (Vera) { film = Submitted("The Quiet Reel", "embargoed until the gala", embargoed: true); }
+  Guid run = Guid.Empty;
+  runas (Vera) { run = RunOf(film).Id; }
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Noor);
+  Ui.Visit("/");
+  Assert.Visible("Not yours to see", within: "Runs");
+  Assert.Hidden("The Quiet Reel");
+  Ui.Visit("/runs/" + run.ToString());
+  Assert.Visible("This run is about something that is not yours to see", within: "Where it stands");
+  Assert.Hidden("The Quiet Reel");
+  Assert.Hidden("What happened");
+  Assert.Hidden("Wrote the synopsis from the pitch.");
+  Assert.NoOverflow();
+  Ui.Shot("run-not-yours-wide-light");
+}
+
+[Test(Office)]
+void an_office_with_no_runs_and_a_link_to_no_run_each_say_so() {
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Noor);
+  Ui.Visit("/");
+  Assert.Visible("No process has run yet");
+  Assert.Visible("A run is listed here from the moment it starts.");
+  Ui.Shot("runs-empty-wide-light");
+  Ui.Visit("/runs/" + Guid.NewGuid().ToString());
+  Assert.Visible("There is no such run");
+  Assert.NoOverflow();
+}
+
+/// ⭐ A page that is open on a run shows it moving, and the list shows a run that started while it was open —
+/// nobody opens either page again.
+[Test(Office)]
+void a_page_that_is_open_shows_a_run_start_move_and_end() {
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Noor);
+  Ui.Visit("/");
+  Assert.Visible("No process has run yet");
+
+  // A print is asked for while the list is open: its film's run and its own are there.
+  var print = APrintAskedFor("Salt Road");
+  Ui.AwaitChange(ProcessRun);
+  Assert.Visible("Print of Salt Road", within: "Runs");
+  Assert.Visible("Requested", within: "Print of Salt Road");
+
+  // The run's own page, opened once.
+  Guid run = Guid.Empty;
+  runas (Noor) { run = ProcessRunAbout("PrintTraffic", print)!.Id; }
+  Ui.Visit("/runs/" + run.ToString());
+  Assert.Visible("Requested", within: "Where it stands");
+  Assert.Hidden("At customs", within: "What happened");
+
+  TestClock.Advance(TimeSpan.FromDays(1));
+  Moved(print, "shipped");
+  Ui.AwaitChange(ProcessRun);
+  Assert.Visible("At customs", within: "Where it stands");
+  Assert.Visible("At customs", within: "What happened");
+  Assert.Visible("Customs paper for Salt Road");
+
+  Moved(print, "stamped");
+  Moved(print, "arrived");
+  Ui.AwaitChange(ProcessRun);
+  Assert.Visible("Arrived", within: "Where it stands");
+  Assert.Visible("Finished", within: "Where it stands");
+  Assert.NoOverflow();
+}

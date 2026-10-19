@@ -1,0 +1,454 @@
+// Osysharp.Processes — a run is recorded by what its own workflow says and told back in order: each state it was
+// in and for how long, what happened there, the run that started it and the runs it started, what it spent on models
+// against the limit set for each run. Read as whoever is looking: a run about a row they may not read shows that it
+// exists and nothing of the row; somebody who follows no processes reads none.
+using Osysharp.Identity;
+using Osysharp.Llm;
+using Osysharp.Workflow;
+using Osysharp.Processes;
+using Festival;
+
+[Test(Office)]
+void a_run_is_told_from_its_first_state_to_where_it_is() {
+  TestClock.Set(new DateTime(2031, 5, 5, 9, 0, 0, DateTimeKind.Utc));
+  TheModelWritesALine();
+  Guid film = Guid.Empty;
+  runas (Noor) { film = Submitted("Salt Road", "Ana Quiroga"); }
+
+  runas (Noor) {
+    var view = ProcessRunOf(RunOf(film).Id)!;
+    Assert.Equal("Salt Road", view.Card.Title);
+    Assert.Equal("Film submission", view.Card.Process);
+    Assert.Equal("Watching", view.Card.State);
+    Assert.Equal("Being watched", view.Card.StateLabel);
+    Assert.Equal(ProcessStatus.Running, view.Card.Status);
+    Assert.Equal("/runs/" + RunOf(film).Id.ToString(), view.Card.Href);
+    Assert.Equal("From a film arriving to its place in the programme.", view.Purpose);
+    // The picture: every state of the process, where the run is, and where it has been.
+    Assert.Equal(6, view.States.Count);
+    Assert.Equal(["Submitted", "Watching"], view.Visited);
+    // Each state it was in, with what the process said there.
+    Assert.Equal(2, view.Stays.Count);
+    Assert.Equal("Submitted", view.Stays[0].Label);
+    Assert.Equal("Wrote the synopsis from the pitch.", view.Stays[0].Moments.Single().Said);
+    Assert.Equal(ProcessNoteTone.Done, view.Stays[0].Moments.Single().Tone);
+    Assert.Equal("Being watched", view.Stays[1].Label);
+    Assert.True(view.Stays[1].Current);
+    Assert.Equal("Waiting for a programmer to watch it.", view.Stays[1].Moments.Single().Said);
+    Assert.Equal(ProcessNoteTone.Waiting, view.Stays[1].Moments.Single().Tone);
+  }
+
+  // Three days and four hours later Idris has watched it; the rights office clears the music the day after.
+  TestClock.Advance(TimeSpan.FromHours(76));
+  runas (Idris) { WatchedAndSettled(film, true); }
+  TestClock.Advance(TimeSpan.FromDays(1));
+  runas (Idris) { RightsAnsweredAndSettled(film, true); }
+
+  runas (Noor) {
+    var view = ProcessRunOf(RunOf(film).Id)!;
+    Assert.Equal(ProcessStatus.Finished, view.Card.Status);
+    Assert.Equal("Selected", view.Card.StateLabel);
+    Assert.Equal("4 days 4 hours", view.Card.Age);
+    Assert.Equal(["Submitted", "Being watched", "Clearing the music", "Selected"], view.Stays.Select(s => s.Label).ToList());
+    Assert.Equal("3 days 4 hours", view.Stays[1].Lasted);
+    Assert.Equal("1 day", view.Stays[2].Lasted);
+    Assert.Equal("Idris Vale answered the verdict step.", view.Stays[1].Moments.Last().Said);
+    Assert.Equal("5 May 2031, 09:00", view.Stays[1].Entered);
+    Assert.Equal("8 May 2031, 13:00", view.Stays[2].Entered);
+    Assert.Equal("Asked the rights office to clear the music.", view.Stays[2].Moments.First().Said);
+    // The run it started, from the run — and the run that started it, from that one.
+    Assert.Equal("Music of Salt Road", view.Started.Single().Title);
+    Assert.Equal("Music clearance", view.Started.Single().Process);
+    Assert.Equal(ProcessStatus.Finished, view.Started.Single().Status);
+    var clearance = ProcessRunOf(ClearanceRunOf(film).Id)!;
+    Assert.Equal("Salt Road", clearance.StartedBy!.Title);
+    Assert.Equal(["Waiting for the rights office.", "Idris Vale answered the answer step."], clearance.Stays[0].Moments.Select(m => m.Said).ToList());
+    Assert.Equal("1 day", clearance.Card.Age);
+  }
+}
+
+[Test(Office)]
+void a_step_that_ends_badly_is_told_where_the_process_handled_it() {
+  TheModelWritesALine();
+  Guid film = Guid.Empty;
+  runas (Noor) {
+    film = Submitted("Glasshouse", "Bao Linh");
+    WatchedAndSettled(film, true);
+    RightsAnsweredAndSettled(film, false);
+  }
+  runas (Noor) {
+    var view = ProcessRunOf(RunOf(film).Id)!;
+    Assert.Equal(ProcessStatus.Stopped, view.Card.Status);
+    Assert.Equal("Declined", view.Card.StateLabel);
+    var clearing = view.Stays.Single(s => s.State == "Clearing");
+    Assert.Equal(["Asked the rights office to clear the music.", "The music could not be cleared."], clearing.Moments.Select(m => m.Said).ToList());
+    Assert.Equal(ProcessNoteTone.Problem, clearing.Moments.Last().Tone);
+    Assert.Equal(ProcessStatus.Stopped, view.Started.Single().Status);
+    Assert.Equal("The music could not be cleared: the rights holder said no", Film.Single(f => f.Id == film).Note);
+  }
+}
+
+[Test(Office)]
+void a_run_that_sits_too_long_is_stuck_and_the_list_finds_it() {
+  TestClock.Set(new DateTime(2031, 5, 5, 9, 0, 0, DateTimeKind.Utc));
+  TheModelWritesALine();
+  Guid old = Guid.Empty;
+  runas (Noor) { old = Submitted("Low Tide", "Mirela Costin"); }
+  TestClock.Advance(TimeSpan.FromDays(6));
+  runas (Noor) { Submitted("Paper Kites", "Jun Okada"); }
+
+  runas (Noor) {
+    var all = ProcessRunsNow(new ProcessFilter());
+    Assert.Equal(2, all.Total);
+    Assert.Equal(["Paper Kites", "Low Tide"], all.Runs.Select(r => r.Title).ToList());        // newest first
+    Assert.Equal(["Film submission", "Music clearance", "Print traffic", "Customs"], all.Processes.Select(p => p.Name).ToList());
+    var stuck = ProcessRunsNow(new ProcessFilter { Show = "stuck" });
+    Assert.Equal("Low Tide", stuck.Runs.Single().Title);
+    Assert.True(stuck.Runs.Single().Stuck);
+    Assert.Equal("It has been at Being watched for 6 days.", stuck.Runs.Single().StuckWhy);
+    Assert.Equal("6 days", stuck.Runs.Single().InState);
+  }
+}
+
+[Test(Office)]
+void the_list_is_narrowed_by_process_by_where_runs_stand_and_by_title() {
+  TheModelWritesALine();
+  runas (Noor) {
+    var salt = Submitted("Salt Road", "Ana Quiroga");
+    Submitted("Low Tide", "Mirela Costin");
+    var kites = Submitted("Paper Kites", "Jun Okada");
+    WatchedAndSettled(salt, true);
+    WatchedAndSettled(kites, false);
+  }
+  runas (Noor) {
+    Assert.Equal(4, ProcessRunsNow(new ProcessFilter()).Runs.Count);
+    Assert.Equal("Music of Salt Road", ProcessRunsNow(new ProcessFilter { Workflow = "MusicRights" }).Runs.Single().Title);
+    Assert.Equal("Paper Kites", ProcessRunsNow(new ProcessFilter { Show = "ended" }).Runs.Single().Title);
+    Assert.Equal(3, ProcessRunsNow(new ProcessFilter { Show = "running" }).Runs.Count);
+    Assert.Equal(["Music of Salt Road", "Salt Road"], ProcessRunsNow(new ProcessFilter { Search = "salt" }).Runs.Select(r => r.Title).OrderBy(t => t).ToList());
+    Assert.Equal(1, ProcessRunsNow(new ProcessFilter(), most: 1).Runs.Count);
+  }
+}
+
+// ── cost ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+[Test(Office)]
+void a_run_costs_what_was_spent_in_it_and_only_who_reads_usage_is_told() {
+  TheModelWritesALine();
+  Guid film = Guid.Empty;
+  runas (Noor) { film = Submitted("Salt Road", "Ana Quiroga"); Submitted("Low Tide", "Mirela Costin"); }
+  // The director reads what the model costs: the one call made in this run, and not the other run's.
+  runas (Vera) {
+    var cost = ProcessRunOf(RunOf(film).Id)!.Cost;
+    Assert.True(cost.Known);
+    Assert.Equal(0.002m, cost.Spent);
+    Assert.Null(cost.Limit);
+    Assert.Equal("$0.0020", cost.Words);
+    Assert.Equal("$0.0020", ProcessRunsNow(new ProcessFilter { Search = "salt" }).Runs.Single().Cost);
+  }
+  // A programmer follows the run and is not told what it cost.
+  runas (Noor) {
+    var view = ProcessRunOf(RunOf(film).Id)!;
+    Assert.False(view.Cost.Known);
+    Assert.Equal("", view.Card.Cost);
+    Assert.Equal(0, view.Cost.Spent);
+  }
+}
+
+[Test(Office)]
+void a_limit_for_each_run_of_a_process_holds_the_calls_made_in_it() {
+  TheModelWritesALine();
+  // A submission may spend 0.4 cents. Its one call holds 0.5 before it leaves: there is no room for it.
+  runas (Noor) { Assert.Throws<NotAuthorized>(() => SetProcessBudget("Submission", 0.004m)); }
+  runas (Vera) {
+    Assert.Throws<ValidationException>(() => SetProcessBudget("Programme", 1));
+    SetProcessBudget("Submission", 0.004m);
+    UnitOfWork.Commit();
+  }
+  Guid film = Guid.Empty;
+  runas (Noor) { film = Submitted("Salt Road", "Ana Quiroga"); }
+  runas (Vera) {
+    // Nothing was sent, the process said so and went on to the next step without its synopsis.
+    Assert.Equal(0, ModelCall.Count(c => c.Outcome == ModelCallOutcome.Served));
+    var view = ProcessRunOf(RunOf(film).Id)!;
+    Assert.Equal("Being watched", view.Card.StateLabel);
+    Assert.Equal("No synopsis was written: the money for this submission ran out.", view.Stays[0].Moments.Single().Said);
+    Assert.Equal(ProcessNoteTone.Problem, view.Stays[0].Moments.Single().Tone);
+    Assert.Equal("", Film.Single(f => f.Id == film).Synopsis);
+    Assert.Equal("$0.00 of $0.0040", view.Cost.Words);
+    // With room, the next submission gets one.
+    SetProcessBudget("Submission", 0.02m);
+    UnitOfWork.Commit();
+  }
+  runas (Noor) { film = Submitted("Low Tide", "Mirela Costin"); }
+  runas (Vera) {
+    var cost = ProcessRunOf(RunOf(film).Id)!.Cost;
+    Assert.Equal(0.02m, cost.Limit);
+    Assert.Equal("$0.0020 of $0.02", cost.Words);
+    SetRunBudget(RunOf(film), 0.5m);
+    UnitOfWork.Commit();
+    Assert.Equal("$0.0020 of $0.50", ProcessRunOf(RunOf(film).Id)!.Cost.Words);
+    Assert.True(RemoveProcessBudget("Submission"));
+  }
+}
+
+// ── who reads what ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+[Test(Office)]
+void a_run_about_a_row_the_reader_may_not_read_shows_that_it_exists_and_nothing_of_the_row() {
+  TheModelWritesALine();
+  Guid film = Guid.Empty;
+  runas (Vera) { film = Submitted("The Quiet Reel", "embargoed until the gala", embargoed: true); }
+  Guid run = Guid.Empty;
+  runas (Vera) {
+    run = RunOf(film).Id;
+    var view = ProcessRunOf(run)!;
+    Assert.True(view.Card.Readable);
+    Assert.Equal("The Quiet Reel", view.Card.Title);
+    Assert.Equal(2, view.Stays.Count);
+  }
+  // A programmer follows processes and may not read an embargoed film.
+  runas (Noor) {
+    var view = ProcessRunOf(run)!;
+    Assert.False(view.Card.Readable);
+    Assert.Equal("", view.Card.Title);
+    Assert.Equal("", view.Card.StateLabel);
+    Assert.Equal("Film submission", view.Card.Process);
+    Assert.Equal(0, view.Stays.Count);
+    Assert.Equal(0, view.Visited.Count);
+    var listed = ProcessRunsNow(new ProcessFilter()).Runs.Single();
+    Assert.False(listed.Readable);
+    Assert.Equal("", listed.Title);
+    // Its title is not found by searching for it.
+    Assert.Equal(0, ProcessRunsNow(new ProcessFilter { Search = "quiet" }).Runs.Count);
+  }
+}
+
+[Test(Office)]
+void somebody_who_follows_no_processes_reads_no_run_and_no_line() {
+  TheModelWritesALine();
+  Guid film = Guid.Empty;
+  Guid run = Guid.Empty;
+  runas (Noor) { film = Submitted("Salt Road", "Ana Quiroga"); run = RunOf(film).Id; }
+  runas (Pia) {
+    Assert.Throws<NotAuthorized>(() => ProcessRunOf(run));
+    Assert.Throws<NotAuthorized>(() => ProcessRunsNow(new ProcessFilter()));
+    Assert.Equal(0, ProcessRun.Count());
+    Assert.Equal(0, ProcessNote.Count());
+  }
+}
+
+[Test(Office)]
+void a_run_and_its_lines_are_written_only_by_the_kit_and_from_a_workflow() {
+  TheModelWritesALine();
+  Guid film = Guid.Empty;
+  runas (Noor) { film = Submitted("Salt Road", "Ana Quiroga"); }
+  runas (Noor) {
+    // Not from a page: there is no run to say it about.
+    Assert.Throws<ValidationException>(() => NoteFromAPage());
+    // Not by hand…
+    Assert.Denied(() => ForgeARun());
+    UnitOfWork.Discard();
+    var run = RunOf(film);
+    Assert.Denied(() => ForgeALine(run));
+    UnitOfWork.Discard();
+    // …and not through the door kept for the app's own code.
+    Assert.Throws<NotAuthorized>(() => RelayALine(run));
+    Assert.Equal(2, ProcessNote.Count());
+    // Nothing kept is changed or deleted by somebody who follows it.
+    Assert.Denied(() => { var note = ProcessNote.First(); note.Delete(); UnitOfWork.Commit(); });
+    UnitOfWork.Discard();
+    Assert.Throws<NotAuthorized>(() => ForgetProcessRun(run));
+  }
+  // The archivist deletes what is kept of a run, through the kit.
+  // The archivist deletes what is kept of a run, through the kit — and follows none.
+  runas (Tomas) {
+    Assert.Throws<NotAuthorized>(() => ProcessRunsNow(new ProcessFilter()));
+    ForgetProcessRun(ProcessRun.Single());
+    UnitOfWork.Commit();
+  }
+  runas (Vera) {
+    Assert.Equal(0, ProcessRun.Count());
+    Assert.Equal(0, ProcessNote.Count());
+  }
+}
+
+// ── what the engine says of a run ──────────────────────────────────────────────────────────────────────────────────
+
+/// A film whose print is asked for at nine on the fifth of May. Answers the print's id.
+Guid APrintAskedFor(string title) {
+  TestClock.Set(new DateTime(2031, 5, 5, 9, 0, 0, DateTimeKind.Utc));
+  TheModelWritesALine();
+  Guid print = Guid.Empty;
+  runas (Noor) {
+    var film = Film.Single(f => f.Id == Submitted(title, "Ana Quiroga"));
+    var asked = RequestPrint(film);
+    Workflow.Settle(asked);
+    print = asked.Id;
+  }
+  Background.Settle();
+  return print;
+}
+
+void Moved(Guid print, string how) {
+  runas (Idris) {
+    var p = Print.Single(x => x.Id == print);
+    if (how == "shipped") { PrintShipped(p); }
+    if (how == "arrived") { PrintArrived(p); }
+    if (how == "recalled") { PrintRecalled(p); }
+    if (how == "stamped") {
+      var paper = CustomsPaper.Single(c => c.Print.Id == print);
+      PaperStamped(paper);
+      Workflow.Settle(paper);
+    }
+    Workflow.Settle(p);
+  }
+  Background.Settle();
+}
+
+/// ⭐ A process that says nothing of itself — it waits, and is moved — is listed from the moment it starts, and
+/// followed to its end. Nothing in its workflow is written for the kit.
+[Test(Office)]
+void a_run_that_only_waits_is_listed_from_its_start_and_followed_to_its_end() {
+  var print = APrintAskedFor("Salt Road");
+  runas (Noor) {
+    var run = ProcessRunAbout("PrintTraffic", print)!;
+    Assert.Equal("Requested", run.State);
+    Assert.Equal(ProcessStatus.Running, run.Standing);
+    Assert.Equal(new DateTime(2031, 5, 5, 9, 0, 0, DateTimeKind.Utc), run.SeenAt);
+    Assert.Equal(new DateTime(2031, 5, 5, 9, 0, 0, DateTimeKind.Utc), run.MovedAt);
+    Assert.Equal(0, ProcessNote.Count(n => n.Run == run));                       // it said nothing
+    var card = ProcessRunsNow(new ProcessFilter { Workflow = "PrintTraffic" }).Runs.Single();
+    Assert.Equal("Print of Salt Road", card.Title);
+    Assert.Equal("Requested", card.StateLabel);
+    Assert.Equal(ProcessStatus.Running, card.Status);
+    Assert.Equal("5 May 2031, 09:00", card.Started);
+  }
+
+  // A day later it is sent, and waits at customs: the paper's run is listed too, under the run that started it.
+  TestClock.Advance(TimeSpan.FromDays(1));
+  Moved(print, "shipped");
+  runas (Noor) {
+    var run = ProcessRunAbout("PrintTraffic", print)!;
+    Assert.Equal("AtCustoms", run.State);
+    Assert.Equal(new DateTime(2031, 5, 6, 9, 0, 0, DateTimeKind.Utc), run.MovedAt);
+    var view = ProcessRunOf(run.Id)!;
+    Assert.Equal(["Requested", "At customs"], view.Stays.Select(s => s.Label).ToList());
+    Assert.Equal("1 day", view.Stays[0].Lasted);
+    Assert.Equal("Customs paper for Salt Road", view.Started.Single().Title);
+    // The paper's process shows no history of its own: where it stands is what the engine said.
+    Assert.Equal("Filed", view.Started.Single().StateLabel);
+    Assert.Equal(ProcessStatus.Running, view.Started.Single().Status);
+  }
+
+  TestClock.Advance(TimeSpan.FromHours(5));
+  Moved(print, "stamped");
+  runas (Noor) {
+    var paper = CustomsPaper.Single(c => c.Print.Id == print);
+    var paperRun = ProcessRunAbout("Customs", paper.Id)!;
+    Assert.Equal("Stamped", paperRun.State);
+    Assert.Equal(ProcessStatus.Finished, paperRun.Standing);
+    Assert.Equal(new DateTime(2031, 5, 6, 14, 0, 0, DateTimeKind.Utc), paperRun.EndedAt);
+    var paperView = ProcessRunOf(paperRun.Id)!;
+    Assert.Equal(["Filed", "Stamped"], paperView.Stays.Select(s => s.Label).ToList());
+    Assert.Equal("5 hours", paperView.Stays[0].Lasted);
+    Assert.Equal(ProcessStatus.Finished, paperView.Card.Status);
+    Assert.Equal("Print of Salt Road", paperView.StartedBy!.Title);
+    Assert.Equal("InTransit", ProcessRunAbout("PrintTraffic", print)!.State);
+  }
+
+  TestClock.Advance(TimeSpan.FromDays(1));
+  Moved(print, "arrived");
+  runas (Noor) {
+    var run = ProcessRunAbout("PrintTraffic", print)!;
+    Assert.Equal("Arrived", run.State);
+    Assert.Equal(ProcessStatus.Finished, run.Standing);
+    Assert.Equal(new DateTime(2031, 5, 7, 14, 0, 0, DateTimeKind.Utc), run.EndedAt);
+    Assert.Equal("Print of Salt Road", ProcessRunsNow(new ProcessFilter { Workflow = "PrintTraffic", Show = "ended" }).Runs.Single().Title);
+    Assert.Equal(0, ProcessNote.Count(n => n.Run == run));
+  }
+}
+
+/// A run that is called off where it stands — its workflow has no cancelled state to go to — reads as stopped.
+[Test(Office)]
+void a_run_called_off_where_it_stood_reads_as_stopped() {
+  var print = APrintAskedFor("Glasshouse");
+  Moved(print, "shipped");
+  TestClock.Advance(TimeSpan.FromHours(3));
+  Moved(print, "recalled");
+  runas (Noor) {
+    var run = ProcessRunAbout("PrintTraffic", print)!;
+    Assert.Equal("Recalled", run.State);
+    Assert.Equal(ProcessStatus.Stopped, run.Standing);
+    // The paper was still at customs: nobody waits for it now, and it ends where it was.
+    var paper = CustomsPaper.Single(c => c.Print.Id == print);
+    Assert.Equal(PaperStage.Filed, paper.Stage);
+    var paperRun = ProcessRunAbout("Customs", paper.Id)!;
+    Assert.Equal("Filed", paperRun.State);
+    Assert.Equal(ProcessStatus.Stopped, paperRun.Standing);
+    var card = ProcessRunOf(paperRun.Id)!.Card;
+    Assert.Equal(ProcessStatus.Stopped, card.Status);
+    Assert.Equal("Filed", card.StateLabel);
+    Assert.Equal("3 hours", card.Age);
+    Assert.False(card.Stuck);
+    Assert.Equal(2, ProcessRunsNow(new ProcessFilter { Show = "ended" }).Runs.Count(r => r.Workflow != "Submission"));
+  }
+}
+
+/// ⭐ The app is told of a run that is stuck — once for each stay — by the kit's own clock.
+[Test(Office)]
+void the_app_is_told_once_of_each_stay_a_run_is_stuck_in() {
+  var print = APrintAskedFor("Low Tide");
+  // A day: not yet too long for a print (two days), and the film has five.
+  TestClock.Advance(TimeSpan.FromDays(1));
+  Background.Settle();
+  runas (Noor) { Assert.Equal(0, StuckNotice.Count()); }
+
+  TestClock.Advance(TimeSpan.FromDays(2));
+  Background.Settle();
+  runas (Noor) {
+    var told = StuckNotice.Single();
+    Assert.Equal("PrintTraffic", told.Workflow);
+    Assert.Equal("Requested", told.State);
+    Assert.Equal(print, told.Item);
+    Assert.Equal(new DateTime(2031, 5, 5, 9, 0, 0, DateTimeKind.Utc), told.Since);
+  }
+  // Asked again while it is still there: said once.
+  TestClock.Advance(TimeSpan.FromHours(6));
+  Background.Settle();
+  runas (Noor) { Assert.Equal(1, StuckNotice.Count()); }
+
+  // It moves, clears customs, and then sits on its way for three days: a new stay, said again. By then the film
+  // has been watched by nobody for longer than its own five days, and is said too.
+  Moved(print, "shipped");
+  Moved(print, "stamped");
+  TestClock.Advance(TimeSpan.FromDays(3));
+  Background.Settle();
+  runas (Noor) {
+    Assert.Equal(["PrintTraffic at InTransit", "PrintTraffic at Requested", "Submission at Watching"],
+      StuckNotice.ToList().Select(n => n.Workflow + " at " + n.State).OrderBy(x => x).ToList());
+  }
+  // A run that has ended is never stuck.
+  Moved(print, "arrived");
+  TestClock.Advance(TimeSpan.FromDays(9));
+  Background.Settle();
+  runas (Noor) { Assert.Equal(3, StuckNotice.Count()); }
+}
+
+/// Where a run stands is what the engine said, and nobody who is signed in writes it.
+[Test(Office)]
+void where_a_run_stands_is_written_only_from_what_the_engine_says() {
+  var print = APrintAskedFor("Paper Kites");
+  runas (Vera) {
+    var run = ProcessRunAbout("PrintTraffic", print)!;
+    Assert.Denied(() => { ForgeAStanding(run); UnitOfWork.Commit(); });
+    UnitOfWork.Discard();
+    // …and nobody signed in asks the clock's question, which would tell the app of runs as if the clock had.
+    Assert.Throws<NotAuthorized>(() => AskWhatIsStuck());
+  }
+  runas (Noor) {
+    var run = ProcessRunAbout("PrintTraffic", print)!;
+    Assert.Equal("Requested", run.State);
+    Assert.Equal(ProcessStatus.Running, run.Standing);
+  }
+}

@@ -1,0 +1,420 @@
+// What the screens read: the runs of the app's processes, and one run told from start to now — each as whoever is
+// looking may see it.
+namespace Osysharp.Processes;
+
+using Osysharp.Identity;
+using Osysharp.Workflow;
+using Osysharp.Llm;
+
+/// Where a run stands.
+public enum ProcessStatus {
+  [Label("Running")] Running,
+  [Label("Finished")] Finished,
+  [Label("Stopped")] Stopped,
+  [Label("Failed")] Failed,
+}
+
+/// One thing that happened to a run.
+public class ProcessMoment {
+  public DateTime At;
+  /// When, as a person reads it: "3 Mar 2031, 09:12".
+  public string When = "";
+  public string Said = "";
+  public ProcessNoteTone Tone = ProcessNoteTone.Plain;
+  /// What it is about, for the page to open — "AgentTask" and the receipt's id; "" and null for nothing.
+  public string SubjectKind = "";
+  public Guid? Subject;
+}
+
+/// One stretch a run spent in one state.
+public class ProcessStay {
+  /// Its place in the run, from 1.
+  public int Number = 0;
+  public string State = "";
+  public string Label = "";
+  public DateTime EnteredAt;
+  public string Entered = "";
+  /// How long it stayed — "3 days 4 hours" — or how long it has been there so far.
+  public string Lasted = "";
+  public bool Current = false;
+  public List<ProcessMoment> Moments = [];
+}
+
+/// What a run has spent on models, and what it may.
+public class ProcessCost {
+  /// Whoever is looking may read what models cost. False: nothing below is filled in.
+  public bool Known = false;
+  /// Spent by this run, in US dollars — every model call made in it, and every call of the agent work it gave.
+  public decimal Spent = 0;
+  /// The same with the runs it started, and theirs.
+  public decimal SpentWithStarted = 0;
+  /// The limit set for each run of this process, or for this run alone. Null: none.
+  public decimal? Limit;
+  /// In words: "$0.04 of $2.00", "$0.04", "$0.31 with the runs it started".
+  public string Words = "";
+}
+
+/// One run, as a line of the list.
+public class ProcessRunCard {
+  /// The kit's row for the run, and the engine's own id for it.
+  public Guid Id;
+  public Guid Run;
+  public string Workflow = "";
+  /// The process's name — the workflow's own, in words, when the app has not named it a process.
+  public string Process = "";
+  /// What the run is about. "" when the row is not whoever-is-looking's to read (`Readable` is false).
+  public string Title = "";
+  public bool Readable = true;
+  public string State = "";
+  public string StateLabel = "";
+  public ProcessStatus Status = ProcessStatus.Running;
+  public DateTime StartedAt;
+  public string Started = "";
+  /// How long it has run, or ran.
+  public string Age = "";
+  /// How long it has been where it is.
+  public string InState = "";
+  public bool Stuck = false;
+  public string StuckWhy = "";
+  /// What it has spent, in words. "" when whoever is looking may not read what models cost.
+  public string Cost = "";
+  /// Its page, when the app has said where runs are shown.
+  public string Href = "";
+}
+
+/// One run, told from start to now.
+public class ProcessRunView {
+  public ProcessRunCard Card = new ProcessRunCard();
+  public string Purpose = "";
+  /// The process's shape, where the run is and where it has been — what the picture is drawn from.
+  public List<WorkflowStateInfo> States = [];
+  public List<WorkflowTransitionInfo> Transitions = [];
+  public List<string> Visited = [];
+  /// Each state it was in, in order, with what happened there.
+  public List<ProcessStay> Stays = [];
+  public ProcessCost Cost = new ProcessCost();
+  /// The run that started this one, and the runs this one started.
+  public ProcessRunCard? StartedBy;
+  public List<ProcessRunCard> Started = [];
+}
+
+/// What the list is narrowed to.
+public class ProcessFilter {
+  /// A workflow's name; "": every process.
+  public string Workflow = "";
+  /// "running", "ended", "stuck"; "": all.
+  public string Show = "";
+  /// Part of a run's title.
+  public string Search = "";
+}
+
+/// One process, for the list's filter.
+public class ProcessChoice {
+  public string Workflow = "";
+  public string Name = "";
+}
+
+/// Everything the list page shows.
+public class ProcessBoard {
+  public List<ProcessChoice> Processes = [];
+  public List<ProcessRunCard> Runs = [];
+  /// How many runs the kit knows in all, before the filter.
+  public int Total = 0;
+}
+
+// ── words ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// A moment as a person reads it: "3 Mar 2031, 09:12".
+public string Moment(DateTime at) { return at.ToString("d MMM yyyy, HH:mm"); }
+
+/// A length of time in its two largest parts: "3 days 4 hours", "2 hours 5 minutes", "under a minute".
+public string Lasting(TimeSpan span) {
+  var minutes = (long)span.TotalMinutes;
+  if (minutes < 1) { return "under a minute"; }
+  var days = minutes / 1440;
+  var hours = (minutes % 1440) / 60;
+  var mins = minutes % 60;
+  if (days > 0) { return Counted(days, "day") + (hours > 0 ? " " + Counted(hours, "hour") : ""); }
+  if (hours > 0) { return Counted(hours, "hour") + (mins > 0 ? " " + Counted(mins, "minute") : ""); }
+  return Counted(mins, "minute");
+}
+
+string Counted(long n, string unit) { return n.ToString() + " " + unit + (n == 1 ? "" : "s"); }
+
+/// US dollars as a person reads them: to the cent, or — below a cent — to four places.
+public string Money(decimal dollars) { return "$" + (dollars != 0 && dollars < 0.01m ? dollars.ToString("0.0000") : dollars.ToString("0.00")); }
+
+string NameOf(Guid? principal) {
+  if (principal == null) { return ""; }
+  var p = Principal.FirstOrDefault(x => x.Id == principal);
+  if (p == null) { return ""; }
+  return p!.DisplayName != "" ? p!.DisplayName : p!.Email;
+}
+
+string LabelOf(List<WorkflowStateInfo> states, string state) {
+  foreach (var s in states) { if (s.Name == state) { return s.Label; } }
+  return Worded(state);
+}
+
+/// A state of a workflow as the people who follow it read it — the tracked enum member's label, when the app has
+/// named the workflow a process; the state's own name in words otherwise.
+public string StateLabelOf(string workflow, string state) {
+  var process = ProcessOf(workflow);
+  return process == null ? Worded(state) : LabelOf(process!.Graph.States.ToList(), state);
+}
+
+/// What one line of a workflow's history says, in a sentence.
+string Told(WorkflowAuditEntry e, List<WorkflowStateInfo> states) {
+  var who = NameOf(e.Actor);
+  var slot = e.Slot == null || e.Slot == "" ? "" : Worded(e.Slot!).ToLower();
+  var because = e.Message == null || e.Message == "" ? "" : ": " + e.Message!;
+  if (e.Kind == AuditKind.Transitioned) { return "Moved to " + LabelOf(states, e.To ?? "") + (who == "" ? "" : ", by " + who) + "."; }
+  if (e.Kind == AuditKind.Claimed) { return (who == "" ? "Somebody" : who) + " took " + (slot == "" ? "it" : "the " + slot + " step") + "."; }
+  if (e.Kind == AuditKind.Released) { return (who == "" ? "Somebody" : who) + " let go of " + (slot == "" ? "it" : "the " + slot + " step") + "."; }
+  if (e.Kind == AuditKind.Assigned) { return (slot == "" ? "It" : "The " + slot + " step") + " was given to somebody" + because + "."; }
+  // An answer with nobody behind it was given by the app itself: something it heard, which it passed on to the run.
+  if (e.Kind == AuditKind.Deposited) { return (who == "" ? "The app itself" : who) + " answered" + (slot == "" ? "" : " the " + slot + " step") + "."; }
+  if (e.Kind == AuditKind.Refused) { return (who == "" ? "Somebody" : who) + " was refused" + because + "."; }
+  if (e.Kind == AuditKind.Reminded) { return "A reminder went out" + because + "."; }
+  if (e.Kind == AuditKind.Breached) { return "A deadline passed" + (slot == "" ? "" : " on the " + slot + " step") + because + "."; }
+  if (e.Kind == AuditKind.Held) { return "Its clock was held" + because + "."; }
+  if (e.Kind == AuditKind.Resumed) { return "Its clock went on" + because + "."; }
+  if (e.Kind == AuditKind.Retargeted) { return "Its deadline was set again" + because + "."; }
+  if (e.Kind == AuditKind.Retired) { return "A deadline was withdrawn" + because + "."; }
+  if (e.Kind == AuditKind.Cancelled) { return "It was cancelled" + (who == "" ? "" : " by " + who) + because + "."; }
+  if (e.Kind == AuditKind.Orphaned) { return "It could not go on from where it was parked, and was failed" + because + "."; }
+  if (e.Kind == AuditKind.Faulted) { return "A step failed" + because + "."; }
+  if (e.Kind == AuditKind.Imported) { return "It was brought in at this state by an import."; }
+  return e.Kind.Name + because + ".";
+}
+
+ProcessNoteTone ToneOf(WorkflowAuditEntry e) {
+  if (e.Kind == AuditKind.Breached || e.Kind == AuditKind.Faulted || e.Kind == AuditKind.Orphaned || e.Kind == AuditKind.Refused) { return ProcessNoteTone.Problem; }
+  if (e.Kind == AuditKind.Held) { return ProcessNoteTone.Waiting; }
+  return ProcessNoteTone.Plain;
+}
+
+// ── one run ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Everything about a run that its workflow's history and the lines said about it tell: each state it was in, in
+/// order, with what happened there.
+List<ProcessStay> StaysOf(ProcessRun run, ProcessBase? process, List<WorkflowAuditEntry> history, List<ProcessNote> notes) {
+  List<WorkflowStateInfo> states = process == null ? [] : process!.Graph.States.ToList();
+  // The moves, and everything else that happened, each oldest first.
+  List<WorkflowAuditEntry> moves = [];
+  List<WorkflowAuditEntry> others = [];
+  foreach (var e in history) {
+    if (e.Kind == AuditKind.Transitioned && e.To != null && e.To != "" && e.To != e.From) { moves.Add(e); }
+    else if (e.Kind != AuditKind.Transitioned) { others.Add(e); }
+  }
+  // Where it started: the workflow's first state; for a workflow the app has not named a process, where its first
+  // move left from, or where its first line was said.
+  var first = "";
+  foreach (var s in states) { if (s.IsInitial) { first = s.Name; } }
+  if (first == "" && moves.Count > 0 && moves[0].From != null) { first = moves[0].From!; }
+  if (first == "" && notes.Count > 0) { first = notes[0].State; }
+  var started = run.SeenAt;
+  if (history.Count > 0 && history[0].At < started) { started = history[0].At; }
+  if (notes.Count > 0 && notes[0].At < started) { started = notes[0].At; }
+
+  // ⚑ THE PATH IS FOLLOWED, NOT READ OFF THE CLOCK: from where the run is, the next move is the earliest one that
+  //   leaves that state. Two moves made within one instant — a body that goes on at once — are then in the order
+  //   they were made, whichever way their timestamps fall.
+  List<ProcessStay> stays = [];
+  var stay = new ProcessStay { Number = 1, State = first, Label = LabelOf(states, first), EnteredAt = started, Entered = Moment(started) };
+  stays.Add(stay);
+  while (moves.Count > 0 && stays.Count < 500) {
+    var next = -1;
+    for (var i = 0; i < moves.Count; i = i + 1) {
+      if (next < 0 && (moves[i].From == stay.State || moves[i].From == null || moves[i].From == "")) { next = i; }
+    }
+    // A move that leaves from somewhere the path is not: taken as it comes, so nothing that happened is left out.
+    if (next < 0) { next = 0; }
+    var move = moves[next];
+    moves.RemoveAt(next);
+    stay.Lasted = Lasting(move.At - stay.EnteredAt);
+    stay = new ProcessStay { Number = stays.Count + 1, State = move.To!, Label = LabelOf(states, move.To!), EnteredAt = move.At, Entered = Moment(move.At) };
+    stays.Add(stay);
+  }
+  // Where the engine says the run is, when its history does not reach there — a process that shows no history, or
+  // a move the history has not told yet.
+  if (run.State != "" && run.MovedAt != null && stay.State != run.State) {
+    stay.Lasted = Lasting(run.MovedAt! - stay.EnteredAt);
+    stay = new ProcessStay { Number = stays.Count + 1, State = run.State, Label = LabelOf(states, run.State), EnteredAt = run.MovedAt!, Entered = Moment(run.MovedAt!) };
+    stays.Add(stay);
+  }
+  stay.Current = true;
+  // Everything else belongs to the state it happened in — the last time the run was there when it did.
+  foreach (var e in others) {
+    HomeOf(stays, e.From ?? "", e.At).Moments.Add(new ProcessMoment { At = e.At, When = Moment(e.At), Said = Told(e, states), Tone = ToneOf(e) });
+  }
+  foreach (var note in notes) { HomeOf(stays, note.State, note.At).Moments.Add(MomentOf(note)); }
+  foreach (var each in stays) { each.Moments = each.Moments.OrderBy(m => m.At).ToList(); }
+  return stays;
+}
+
+/// The stay something that happened in `state` at `at` belongs to: the last time the run was in that state by then —
+/// the first time it was, when the clock puts it before any; where the run is now, when it was never there.
+ProcessStay HomeOf(List<ProcessStay> stays, string state, DateTime at) {
+  var home = stays[stays.Count - 1];
+  var found = false;
+  foreach (var candidate in stays) {
+    if (candidate.State == state && (!found || candidate.EnteredAt <= at)) { home = candidate; found = true; }
+  }
+  return home;
+}
+
+ProcessMoment MomentOf(ProcessNote note) {
+  return new ProcessMoment { At = note.At, When = Moment(note.At), Said = note.Said, Tone = note.Tone, SubjectKind = note.SubjectKind, Subject = note.Subject };
+}
+
+/// One run as a line of the list — and, with `stays`, the states it was in.
+ProcessRunCard CardOf(ProcessRun run, List<ProcessStay> stays, ProcessBase? process, string? title, bool faulted) {
+  var now = DateTime.UtcNow;
+  var last = stays[stays.Count - 1];
+  var card = new ProcessRunCard {
+    Id = run.Id, Run = run.Run, Workflow = run.Workflow, Process = process == null ? Worded(run.Workflow) : process!.Name,
+    Title = title ?? "", Readable = title != null, State = last.State, StateLabel = last.Label,
+    StartedAt = stays[0].EnteredAt, Started = stays[0].Entered, Href = RunPageOf(run.Id),
+  };
+  // SECURITY-INVARIANT(processes-a-run-shows-nothing-of-a-row-its-reader-may-not-read): following processes admits a
+  // reader to the LIST of runs, never to the row a run is about. `TitleOfId` reads that row as the reader and answers
+  // null when it is not theirs; from there the title, the state, the workflow's history and every line said about
+  // the run are left out — a line can be about the row. Showing any of them here leaks a record the app's own rules
+  // keep from this person. Guarded by tests/runs.test.osy
+  // `a_run_about_a_row_the_reader_may_not_read_shows_that_it_exists_and_nothing_of_the_row`.
+  if (title == null) {
+    card.State = "";
+    card.StateLabel = "";
+    card.StartedAt = run.SeenAt;
+    card.Started = Moment(run.SeenAt);
+    card.Age = Lasting(now - run.SeenAt);
+    return card;
+  }
+  var ended = false;
+  if (process != null) {
+    foreach (var s in process!.Graph.States) {
+      if (s.Name == last.State && s.IsTerminal) {
+        ended = true;
+        card.Status = s.Outcome == "Success" ? ProcessStatus.Finished : s.Outcome == "Cancel" ? ProcessStatus.Stopped : ProcessStatus.Failed;
+      }
+    }
+  }
+  // A run that was stopped where it stood, or given up, is at no terminal state: the engine said how it ended.
+  if (!ended && run.Standing != ProcessStatus.Running) {
+    card.Status = run.Standing;
+    card.Age = Lasting((run.EndedAt ?? last.EnteredAt) - card.StartedAt);
+    last.Lasted = Lasting((run.EndedAt ?? last.EnteredAt) - last.EnteredAt);
+    last.Current = false;
+    return card;
+  }
+  if (ended) {
+    card.Age = Lasting(last.EnteredAt - card.StartedAt);
+    last.Lasted = "";
+    last.Current = false;
+    return card;
+  }
+  card.Age = Lasting(now - card.StartedAt);
+  card.InState = Lasting(now - last.EnteredAt);
+  last.Lasted = card.InState;
+  if (faulted) {
+    card.Status = ProcessStatus.Failed;
+    card.Stuck = true;
+    card.StuckWhy = "A step failed, and the run has not gone on.";
+  } else if (process != null && process!.StuckAfter != null && now - last.EnteredAt > process!.StuckAfter!) {
+    card.Stuck = true;
+    card.StuckWhy = "It has been at " + last.Label + " for " + card.InState + ".";
+  }
+  return card;
+}
+
+/// The lines said about a run, in the order they happened. A step's own line carries the moment the step says it
+/// happened, and is recorded once the step's unit of work has ended — after a line the process says next, in the
+/// same instant, about what the step came to. So of two lines of one instant, the step's is first.
+List<ProcessNote> NotesOf(ProcessRun run) {
+  return ProcessNote.Where(n => n.Run == run).ToList()
+    .OrderBy(n => n.At).ThenBy(n => n.Subject == null ? 1 : 0).ThenBy(n => n.Seq).ToList();
+}
+
+/// A run's history as whoever is looking may read it, and whether its last line is a failure nobody handled.
+List<WorkflowAuditEntry> HistoryOf(ProcessRun run, ProcessBase? process) {
+  if (process == null || run.Item == null) { return []; }
+  return process!.HistoryOfId(run.Item!).OrderBy(e => e.At).ToList();
+}
+
+bool EndedInAFault(List<WorkflowAuditEntry> history) {
+  if (history.Count == 0) { return false; }
+  var last = history[history.Count - 1].Kind;
+  return last == AuditKind.Faulted || last == AuditKind.Orphaned;
+}
+
+ProcessRunCard Described(ProcessRun run, bool withCost) {
+  var process = ProcessOf(run.Workflow);
+  var title = process == null || run.Item == null ? "" : process!.TitleOfId(run.Item!);
+  var history = title == null ? [] : HistoryOf(run, process);
+  // What was said about a run can be about its row, so it is read with the row or not at all.
+  List<ProcessNote> notes = title == null ? [] : NotesOf(run);
+  var card = CardOf(run, StaysOf(run, process, history, notes), process, title, EndedInAFault(history));
+  if (withCost) { card.Cost = CostOf(run).Words; }
+  return card;
+}
+
+/// ⭐ ONE RUN, told from start to now: the picture, each state it was in and for how long, what happened there, what
+/// it cost, and the runs around it. Null when there is no such run — or whoever is looking does not follow processes.
+///
+/// What the run is ABOUT is read as whoever is looking: a run whose row they may not read comes back with
+/// `Card.Readable` false, no title and none of its workflow's history — the lines kits recorded for it, its cost and
+/// its place are still there.
+[Server, Authorize(FollowsProcesses)]
+public ProcessRunView? ProcessRunOf(Guid id) {
+  var run = ProcessRun.FirstOrDefault(r => r.Id == id);
+  if (run == null) { return null; }
+  var process = ProcessOf(run!.Workflow);
+  var title = process == null || run!.Item == null ? "" : process!.TitleOfId(run!.Item!);
+  var history = title == null ? [] : HistoryOf(run!, process);
+  List<ProcessNote> notes = title == null ? [] : NotesOf(run!);
+  var view = new ProcessRunView { Purpose = process == null ? "" : process!.Purpose };
+  view.Stays = StaysOf(run!, process, history, notes);
+  view.Card = CardOf(run!, view.Stays, process, title, EndedInAFault(history));
+  if (title == null) { view.Stays = []; }
+  if (process != null && title != null) {
+    view.States = process!.Graph.States.ToList();
+    view.Transitions = process!.Graph.Transitions.ToList();
+  }
+  foreach (var stay in view.Stays) { if (stay.State != "" && !view.Visited.Contains(stay.State)) { view.Visited.Add(stay.State); } }
+  view.Cost = CostOf(run!);
+  view.Card.Cost = view.Cost.Words;
+  if (run!.Starter != null) {
+    var parent = ProcessRun.FirstOrDefault(r => r.Run == run!.Starter);
+    if (parent != null) { view.StartedBy = Described(parent!, false); }
+  }
+  foreach (var child in ProcessRun.Where(r => r.Starter == run!.Run).OrderBy(r => r.SeenAt).ToList()) { view.Started.Add(Described(child, true)); }
+  return view;
+}
+
+/// ⭐ THE RUNS OF THE APP'S PROCESSES, newest first, narrowed by `filter` — at most `most` of them.
+[Server, Authorize(FollowsProcesses)]
+public ProcessBoard ProcessRunsNow(ProcessFilter filter, int most = 50) {
+  var board = new ProcessBoard { Total = ProcessRun.Count() };
+  foreach (var p in App.Setting<ProcessesSetup>().Processes) { board.Processes.Add(new ProcessChoice { Workflow = p.Workflow, Name = p.Name }); }
+  var rows = filter.Workflow == ""
+    ? ProcessRun.OrderByDescending(r => r.SeenAt).Take(200).ToList()
+    : ProcessRun.Where(r => r.Workflow == filter.Workflow).OrderByDescending(r => r.SeenAt).Take(200).ToList();
+  var search = filter.Search.Trim().ToLower();
+  foreach (var run in rows) {
+    if (board.Runs.Count >= most) { break; }
+    var card = Described(run, true);
+    if (filter.Show == "running" && card.Status != ProcessStatus.Running) { continue; }
+    if (filter.Show == "ended" && card.Status == ProcessStatus.Running) { continue; }
+    if (filter.Show == "stuck" && !card.Stuck) { continue; }
+    if (search != "" && !card.Title.ToLower().Contains(search) && !card.Process.ToLower().Contains(search)) { continue; }
+    board.Runs.Add(card);
+  }
+  return board;
+}
+
+/// The kit's row for the run of `workflow` about `item` — the newest, when it ran more than once. Null: nothing was
+/// ever recorded for one.
+public ProcessRun? ProcessRunAbout(string workflow, Guid item) {
+  return ProcessRun.Where(r => r.Workflow == workflow && r.Item == item).OrderByDescending(r => r.SeenAt).FirstOrDefault();
+}

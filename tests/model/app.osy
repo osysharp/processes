@@ -1,0 +1,309 @@
+// The Northlight Film Festival's programme office: films are submitted, watched, cleared and selected. The
+// programmers and the festival's director follow each submission; the director alone reads a film under embargo,
+// and what the model costs; the archivist deletes what is kept of old runs.
+namespace Festival;
+
+using Osysharp.Identity;
+using Osysharp.Llm;
+using Osysharp.Workflow;
+using Osysharp.Processes;
+
+[Role] enum FestivalRole { Authenticator, Programmer, Director, Archivist, Usher }
+
+partial entity RoleGrant { security { allow read when IsAuthenticated; } }
+
+policy IsProgrammer => RoleGrant.Any(g => g.Member == user && g.Role == FestivalRole.Programmer);
+policy IsDirector   => RoleGrant.Any(g => g.Member == user && g.Role == FestivalRole.Director);
+policy IsArchivist  => RoleGrant.Any(g => g.Member == user && g.Role == FestivalRole.Archivist);
+
+// Who follows the festival's processes; who reads what the model costs and sets what a run may spend; who deletes
+// what is kept of a run.
+policy FollowsProcesses     => IsProgrammer || IsDirector;
+policy ReadsModelUsage      => IsDirector;
+policy ManagesModelSpend    => IsDirector;
+policy ErasesProcessRecords => IsArchivist;
+
+/// Somebody at the festival.
+entity Person : Principal {
+  security {
+    allow read when IsAuthenticated || IsAuthenticator;
+    allow create when IsAuthenticator;
+  }
+}
+
+public enum FilmStage {
+  Submitted,
+  [Label("Being watched")] Watching,
+  [Label("Clearing the music")] Clearing,
+  Selected,
+  Declined,
+  Withdrawn,
+}
+
+/// A film sent in to the festival.
+entity Film {
+  [Required, Unique, MaxLength(120)] string Title;
+  [MaxLength(120)] string By = "";
+  [MaxLength(2000)] string Pitch = "";
+  [MaxLength(400)] string Synopsis = "";
+  /// Under embargo: only the director reads it until the programme is announced.
+  bool Embargoed = false;
+  FilmStage Stage = FilmStage.Submitted;
+  [MaxLength(400)] string Note = "";
+  security {
+    allow read, create, update when IsDirector;
+    allow read, create, update when IsProgrammer where !Embargoed;
+  }
+}
+
+public enum ClearanceStage { Asked, Cleared, Refused }
+
+/// The rights office's check of a film's music.
+entity Clearance {
+  [Required] Film Film;
+  ClearanceStage Stage = ClearanceStage.Asked;
+  security { allow read, create, update when IsProgrammer || IsDirector; }
+}
+
+/// A line for the programme, from the film-maker's pitch.
+string Synopsis(string pitch) { return await Llm.Complete("Write a one-line synopsis of this film from its pitch: " + pitch); }
+
+// ── the two processes ───────────────────────────────────────────────────────────────────────────────────────────────
+
+/// A film's way into the programme.
+workflow Submission {
+  Tracks = Film.Stage; Autostart = false; Initial = Submitted;
+  /// A programmer has watched it.
+  event Verdict(bool wanted);
+  /// The film-maker takes the film back.
+  event Withdraw();
+
+  state Submitted {
+    enter {
+      try {
+        this.Item.Synopsis = Synopsis(this.Item.Pitch);
+        Processes.Done("Wrote the synopsis from the pitch.");
+      } catch (LlmBudgetExceeded e) {
+        // The synopsis is a nicety: without the money for it, a programmer watches the film all the same.
+        Processes.Problem("No synopsis was written: the money for this submission ran out.");
+      }
+      goto Watching;
+    }
+  }
+  state Watching {
+    subscribe Verdict(bool wanted);
+    enter { Processes.Waiting("Waiting for a programmer to watch it."); }
+    on Verdict(bool wanted) {
+      when (wanted) { goto Clearing; }
+      default { goto Declined; }
+    }
+  }
+  state Clearing {
+    enter {
+      var clearance = Workflow.Once("ask-clearance", () => new Clearance { Film = this.Item });
+      Processes.Note("Asked the rights office to clear the music.");
+      try {
+        await Workflow.Run("clearance", clearance);
+        goto Selected;
+      } catch (WorkflowCancelled e) {
+        this.Item.Note = "The music could not be cleared: " + e.Message;
+        Processes.Problem("The music could not be cleared.");
+        goto Declined;
+      }
+    }
+  }
+  on Withdraw { goto Withdrawn; }
+
+  terminal success Selected  { }
+  terminal cancel  Declined  { Message = "the film was not selected"; }
+  terminal cancel  Withdrawn { Message = "the film-maker took the film back"; }
+}
+
+/// The rights office clears a film's music — or cannot.
+workflow MusicRights {
+  Tracks = Clearance.Stage; Autostart = false; Initial = Asked;
+  event Answer(bool cleared);
+  state Asked {
+    subscribe Answer(bool cleared);
+    enter { Processes.Waiting("Waiting for the rights office."); }
+    on Answer(bool cleared) {
+      when (cleared) { goto Cleared; }
+      default { goto Refused; }
+    }
+  }
+  terminal success Cleared { }
+  terminal cancel  Refused { Message = "the rights holder said no"; }
+}
+
+/// A film's way into the programme, for the people who follow it.
+public class FilmSubmission : Process<Film> {
+  public override string Name => "Film submission";
+  public override string Workflow => "Submission";
+  public override string Purpose => "From a film arriving to its place in the programme.";
+  public override WorkflowGraph Graph => Submission.Graph;
+  public override TimeSpan? StuckAfter => TimeSpan.FromDays(5);
+  public override string TitleOf(Film f) => f.Title;
+  public override List<WorkflowAuditEntry> HistoryOf(Film f) => Submission.For(f).Audit;
+}
+
+/// Clearing a film's music.
+public class MusicClearance : Process<Clearance> {
+  public override string Name => "Music clearance";
+  public override string Workflow => "MusicRights";
+  public override WorkflowGraph Graph => MusicRights.Graph;
+  public override string TitleOf(Clearance c) => "Music of " + c.Film.Title;
+  public override List<WorkflowAuditEntry> HistoryOf(Clearance c) => MusicRights.For(c).Audit;
+}
+
+// ── two processes that say nothing of themselves ───────────────────────────────────────────────────────────────────
+
+public enum PrintStage {
+  Requested,
+  [Label("At customs")] AtCustoms,
+  [Label("On its way")] InTransit,
+  Arrived,
+  Recalled,
+}
+
+/// The print of a film, on its way to the festival's projection booth.
+entity Print {
+  [Required] Film Film;
+  PrintStage Stage = PrintStage.Requested;
+  security { allow read, create, update when IsProgrammer || IsDirector; }
+}
+
+public enum PaperStage { Filed, Stamped }
+
+/// The customs paper for a print that crosses a border.
+entity CustomsPaper {
+  [Required] Print Print;
+  PaperStage Stage = PaperStage.Filed;
+  security { allow read, create, update when IsProgrammer || IsDirector; }
+}
+
+/// A print's way to the festival. Nothing in it says anything of the run: it waits, and is moved.
+workflow PrintTraffic {
+  Tracks = Print.Stage; Autostart = false; Initial = Requested;
+  /// The distributor has sent it.
+  event Shipped();
+  /// It is in the booth.
+  event Arrive();
+  /// The distributor wants it back.
+  event Recall();
+
+  state Requested {
+    subscribe Shipped();
+    on Shipped { goto AtCustoms; }
+  }
+  state AtCustoms {
+    enter {
+      var paper = Workflow.Once("file-the-paper", () => new CustomsPaper { Print = this.Item });
+      await Workflow.Run("customs", paper);
+      goto InTransit;
+    }
+  }
+  state InTransit {
+    subscribe Arrive();
+    on Arrive { goto Arrived; }
+  }
+  on Recall { goto Recalled; }
+
+  terminal success Arrived  { }
+  terminal cancel  Recalled { Message = "the distributor called the print back"; }
+}
+
+/// Customs stamps a print's paper. It has no way to be cancelled of its own: called off, it ends where it stands.
+workflow Customs {
+  Tracks = CustomsPaper.Stage; Autostart = false; Initial = Filed;
+  event Stamp();
+  state Filed {
+    subscribe Stamp();
+    on Stamp { goto Stamped; }
+  }
+  terminal success Stamped { }
+}
+
+/// A print's way to the booth, for the people who follow it. Two days in one place is too long.
+public class PrintShipping : Process<Print> {
+  public override string Name => "Print traffic";
+  public override string Workflow => "PrintTraffic";
+  public override WorkflowGraph Graph => PrintTraffic.Graph;
+  public override TimeSpan? StuckAfter => TimeSpan.FromDays(2);
+  public override string TitleOf(Print p) => "Print of " + p.Film.Title;
+  public override List<WorkflowAuditEntry> HistoryOf(Print p) => PrintTraffic.For(p).Audit;
+}
+
+/// A print's customs paper. The app shows no history for it: where it stands is what the engine says.
+public class CustomsClearance : Process<CustomsPaper> {
+  public override string Name => "Customs";
+  public override string Workflow => "Customs";
+  public override WorkflowGraph Graph => Customs.Graph;
+  public override string TitleOf(CustomsPaper c) => "Customs paper for " + c.Print.Film.Title;
+}
+
+/// What the office was told of a run that is stuck.
+entity StuckNotice {
+  [MaxLength(200)] string Workflow = "";
+  [MaxLength(200)] string State = "";
+  Guid? Item;
+  DateTime Since;
+  security { allow read when FollowsProcesses; }
+}
+
+[On]
+void TellTheOffice(ProcessStuck e) {
+  new StuckNotice { Workflow = e.Workflow, State = e.State, Item = e.Item, Since = e.Since };
+}
+
+// ── what the office does ────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Ask the distributor for a film's print.
+public Print RequestPrint(Film film) {
+  var print = new Print { Film = film };
+  UnitOfWork.Commit();
+  Workflow.Run(print);
+  return print;
+}
+
+/// The distributor has sent the print; it is in the booth; the distributor wants it back; customs stamps its paper.
+public void PrintShipped(Print print) { PrintTraffic.RaiseShipped(print); }
+public void PrintArrived(Print print) { PrintTraffic.RaiseArrive(print); }
+public void PrintRecalled(Print print) { PrintTraffic.RaiseRecall(print); }
+public void PaperStamped(CustomsPaper paper) { Customs.RaiseStamp(paper); }
+
+/// Where a run stands, written by the app.
+public void ForgeAStanding(ProcessRun run) { run.State = "Arrived"; run.Standing = ProcessStatus.Finished; }
+
+/// The clock's question, asked by somebody signed in.
+public int AskWhatIsStuck() { return TellOfStuckRuns(DateTime.UtcNow); }
+
+/// Take a film in.
+public Film Submit(string title, string by, string pitch, bool embargoed = false) {
+  var film = new Film { Title = title, By = by, Pitch = pitch, Embargoed = embargoed };
+  UnitOfWork.Commit();
+  Workflow.Run(film);
+  return film;
+}
+
+/// A programmer has watched a film.
+public void Watched(Film film, bool wanted) { Submission.RaiseVerdict(film, wanted); }
+
+/// The rights office answers.
+public void RightsAnswered(Clearance clearance, bool cleared) { MusicRights.RaiseAnswer(clearance, cleared); }
+
+/// The film-maker takes a film back.
+public void TakeBack(Film film) { Submission.RaiseWithdraw(film); }
+
+/// A line said about a run from outside any run — what `Processes.Note` refuses.
+public void NoteFromAPage() { Processes.Note("Said from a page."); }
+
+/// A run made up by the app.
+public void ForgeARun() { new ProcessRun { Run = Guid.NewGuid(), Workflow = "Submission" }; }
+
+/// A line made up by the app.
+public void ForgeALine(ProcessRun run) { new ProcessNote { Run = run, Said = "The director approved it." }; }
+
+/// A line handed to the kit by somebody signed in.
+public void RelayALine(ProcessRun run) {
+  NoteOnProcessRun(new ProcessLine { Run = run.Run, Workflow = run.Workflow, Said = "The director approved it." });
+}

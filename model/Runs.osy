@@ -1,0 +1,355 @@
+// What the kit keeps of a run: that it exists — which workflow, about which row —, where the engine last said it
+// stands, and the lines said about it. How it got there is the workflow's own history, read when somebody looks.
+namespace Osysharp.Processes;
+
+using Osysharp.Identity;
+using Osysharp.Workflow;
+
+/// Who deletes what the kit keeps of a run — its notes, and that it was seen. Nobody, until the app says:
+/// `policy ErasesProcessRecords => IsRecordsClerk;`.
+virtual policy ErasesProcessRecords => false;
+
+/// ⭐ ONE RUN OF A WORKFLOW, as the kit knows it: the engine's own id for the run, the workflow's name, the row the
+/// run tracks, and the run that started it from its own body — written once, by this package alone, and never
+/// changed — and where it stands, which the kit keeps as the engine says it.
+///
+/// A run of a workflow the app named a process is listed from the moment it starts: the engine says so
+/// (`WorkflowRunStarted`), and nothing has to be written in the workflow. A run of any other workflow is listed from
+/// the first thing recorded for it — a line of its own (`Processes.Note`) or a step another kit records there.
+[Unique(Run)]
+public entity ProcessRun {
+  [Required, Immutable] Guid Run;
+  [Required, Immutable, MaxLength(200), Index] string Workflow;
+  [Immutable, Index] Guid? Item;
+  [Immutable, Index] Guid? Starter;
+  /// When it started — or, for a run the engine did not announce, when the first thing was recorded for it.
+  [Immutable] DateTime SeenAt = DateTime.UtcNow;
+  /// The state it is in, by name, as the engine last said. "": the engine has said nothing of this run.
+  [MaxLength(200)] string State = "";
+  /// When it came to that state. What "it has not moved for two days" is asked of.
+  [Index] DateTime? MovedAt;
+  /// Whether it still runs, and how it ended.
+  ProcessStatus Standing = ProcessStatus.Running;
+  DateTime? EndedAt;
+  /// When the engine last said anything of it — what an open page watches to show a run that moved.
+  [Index] DateTime? ChangedAt;
+  /// The stay the app was last told is stuck (`ProcessStuck`), by when the run came to it: told once for each stay.
+  DateTime? StuckToldFor;
+
+  security {
+    allow read when FollowsProcesses || ErasesProcessRecords;
+    // SECURITY-INVARIANT(processes-runs-and-lines-are-the-kits-own): what a run's page says happened is what was
+    // recorded from the run itself. A line is created by `RecordProcessNote` alone — reached from a workflow's
+    // body, which reads the run from the engine (`Workflow.Current`), or from `NoteOnProcessRun`, which only the
+    // app's own code may call — and is never changed. A run is created there or by `FollowProcessRun`, which hears
+    // the engine say a run started, moved or ended and is called by nothing else; where a run stands is written by
+    // that function alone, and that the app was told of a stuck run by `TellOfStuckRuns` alone. A grant or an
+    // `except via` widened here lets somebody signed in write a line onto a run ("The director approved it.") or
+    // say a run finished. Guarded by tests/runs.test.osy
+    // `a_run_and_its_lines_are_written_only_by_the_kit_and_from_a_workflow` and
+    // `where_a_run_stands_is_written_only_from_what_the_engine_says`.
+    allow create when IsAuthenticated;
+    deny create except via RecordProcessNote, FollowProcessRun;
+    allow update when IsAuthenticated;
+    deny update except via FollowProcessRun, TellOfStuckRuns;
+    allow delete when ErasesProcessRecords;
+    deny delete except via ForgetProcessRun;
+  }
+}
+
+/// How a line about a run reads. ⚠ Appended, never inserted: an enum is stored by position.
+public enum ProcessNoteTone {
+  /// Something happened.
+  [Label("Note")] Plain,
+  /// Something is waited for.
+  [Label("Waiting")] Waiting,
+  /// Something was finished.
+  [Label("Done")] Done,
+  /// Something went wrong.
+  [Label("Problem")] Problem,
+}
+
+/// ⭐ ONE LINE SAID ABOUT A RUN, in the state it was in: by the process itself (`Processes.Note`), or by a kit that
+/// records its own steps there — an agent's work, by `Osysharp.Agents.Processes`. A line can name what it is about
+/// (`SubjectKind` and `Subject`), which a page can open.
+///
+/// Written by this package alone, and never changed.
+public entity ProcessNote {
+  [Required, Immutable, Index] ProcessRun Run;
+  [Immutable, MaxLength(200)] string State = "";
+  [Immutable] DateTime At = DateTime.UtcNow;
+  /// Its place among the lines of its run, in the order they were recorded — what tells two lines of one instant apart.
+  [Immutable] int Seq = 0;
+  [MaxLength(600), Classification(Personal.Content)] string Said = "";
+  [Immutable] ProcessNoteTone Tone = ProcessNoteTone.Plain;
+  [Immutable, MaxLength(80)] string SubjectKind = "";
+  [Immutable] Guid? Subject;
+
+  security {
+    allow read when FollowsProcesses || ErasesProcessRecords;
+    allow create when IsAuthenticated;
+    deny create except via RecordProcessNote;
+    // A line is never rewritten — except what it says about a thing that was erased, by `RetellProcessLines`.
+    allow update when ErasesProcessRecords;
+    deny update Said except via RetellProcessLines;
+    allow delete when ErasesProcessRecords;
+    deny delete except via ForgetProcessRun;
+  }
+}
+
+/// A line about a run, as it is handed to the kit by code that knows which run it means.
+public class ProcessLine {
+  /// The run — `Workflow.Current.Id` where it was read — with its workflow, the row it tracks and the run that started it.
+  public Guid Run;
+  public string Workflow = "";
+  public Guid? Item;
+  public Guid? Starter;
+  /// The state the line belongs to.
+  public string State = "";
+  /// When what it says happened, when that is not now — a step that ended a moment before its line is recorded.
+  public DateTime? At;
+  public string Said = "";
+  public ProcessNoteTone Tone = ProcessNoteTone.Plain;
+  /// What the line is about, for a page to open: a kind the page knows — "AgentTask" — and its id.
+  public string SubjectKind = "";
+  public Guid? Subject;
+}
+
+/// ⭐ WHAT A PROCESS SAYS IT DID — in its own workflow's body, or in anything the body calls.
+///
+///     state Vetting {
+///       enter {
+///         Processes.Note("Asked the register for " + this.Item.RegistrationNumber + ".");
+///         …
+///         if (late) { Processes.Problem("The register did not answer in two days."); goto Escalated; }
+///       }
+///     }
+///
+/// Each line is kept with the state the run was in when it was said, and shown there on the run's page. It is a unit
+/// of work of its own: the line is there whatever becomes of the body that said it.
+public class Processes {
+  /// Something the process did.
+  public static void Note(string said) { SayHere(said, ProcessNoteTone.Plain); }
+  /// Something the process now waits for — "Waiting for the supplier's bank details."
+  public static void Waiting(string said) { SayHere(said, ProcessNoteTone.Waiting); }
+  /// Something the process finished.
+  public static void Done(string said) { SayHere(said, ProcessNoteTone.Done); }
+  /// Something that went wrong, and that the process handled or could not.
+  public static void Problem(string said) { SayHere(said, ProcessNoteTone.Problem); }
+
+  /// The run this code is in, as the kit knows it — recorded now if nothing was recorded for it before. Null outside
+  /// a workflow's run.
+  public static Guid? Here() {
+    var run = Workflow.Current;
+    if (run == null) { return null; }
+    return RecordProcessNote(new ProcessLine { Run = run.Id, Workflow = run.Workflow, Item = run.Item, Starter = run.Starter });
+  }
+}
+
+void SayHere(string said, ProcessNoteTone tone) {
+  var run = Workflow.Current;
+  if (run == null) {
+    throw new ValidationException("A process says what it did from its own workflow: `Processes.Note(…)` belongs in a state's body, or in a function that body calls.");
+  }
+  if (said.Trim() == "") { throw new ValidationException("Say what happened, in a sentence."); }
+  RecordProcessNote(new ProcessLine {
+    Run = run.Id, Workflow = run.Workflow, Item = run.Item, Starter = run.Starter,
+    State = run.State, Said = said, Tone = tone,
+  });
+}
+
+/// ⭐ A LINE ABOUT A RUN, FROM A KIT THAT RECORDS ITS OWN STEPS THERE — `Osysharp.Agents.Processes` says when an
+/// agent was given work in a run, and how the work ended. For code that runs as the app only: an event handler, a
+/// workflow's body. The run is recorded with it when nothing was recorded for it before.
+[Server, Authorize(IsTheApp)]
+public void NoteOnProcessRun(ProcessLine line) { RecordProcessNote(line); }
+
+/// ⭐ TELL AGAIN, IN `said`, EVERY LINE OF EVERY RUN ABOUT ONE THING — what a kit calls when the thing its lines name
+/// was erased: a request put to somebody who asked to be forgotten. The lines keep their place, time and tone.
+/// Answers how many.
+[Server, Authorize(ErasesProcessRecords)]
+public int RetellProcessLines(string subjectKind, Guid subject, string said) {
+  var n = 0;
+  foreach (var line in ProcessNote.Where(l => l.SubjectKind == subjectKind && l.Subject == subject).ToList()) {
+    line.Said = said.Length <= 600 ? said : said.Substring(0, 600);
+    n = n + 1;
+  }
+  return n;
+}
+
+/// The one place a run and a line about it are written. Answers the run's row. A line that says nothing records
+/// only that the run exists.
+[Server, Authorize(IsAuthenticated), OwnUnitOfWork]
+internal Guid RecordProcessNote(ProcessLine line) {
+  var run = ProcessRun.FirstOrDefault(r => r.Run == line.Run);
+  if (run == null) {
+    // Two steps of one run recorded at once: the declared [Unique] settles who made the row.
+    try {
+      run = new ProcessRun { Run = line.Run, Workflow = line.Workflow, Item = line.Item, Starter = line.Starter };
+      UnitOfWork.Commit();
+    } catch (ValidationException e) {
+      UnitOfWork.Discard();
+      run = ProcessRun.Single(r => r.Run == line.Run);
+    }
+  }
+  if (line.Said.Trim() != "") {
+    var row = run!;
+    new ProcessNote {
+      Run = row, State = line.State, At = line.At ?? DateTime.UtcNow, Seq = ProcessNote.Count(n => n.Run == row) + 1,
+      Said = line.Said.Length <= 600 ? line.Said : line.Said.Substring(0, 600), Tone = line.Tone,
+      SubjectKind = line.SubjectKind, Subject = line.Subject,
+    };
+  }
+  return run!.Id;
+}
+
+// ── what the engine says of a run ──────────────────────────────────────────────────────────────────────────────────
+
+// The platform raises an event when a run starts, when it leaves one state for another and when it ends. The kit
+// hears all three, for the workflows the app named processes: so a run is listed from its start — also one that only
+// waits, and says nothing —, the kit knows where each run stands without reading its history, and a page that is
+// open on a run shows it moving.
+
+[On] void ProcessRunBegan(WorkflowRunStarted e) {
+  if (ProcessOf(e.Workflow) == null) { return; }
+  FollowProcessRun(new ProcessLine { Run = e.Run, Workflow = e.Workflow, Item = e.Item, Starter = e.Starter, State = e.State, At = e.At }, ProcessStatus.Running);
+}
+
+[On] void ProcessRunMoved(WorkflowRunMoved e) {
+  if (ProcessOf(e.Workflow) == null) { return; }
+  FollowProcessRun(new ProcessLine { Run = e.Run, Workflow = e.Workflow, Item = e.Item, Starter = e.Starter, State = e.To, At = e.At }, ProcessStatus.Running);
+}
+
+[On] void ProcessRunOver(WorkflowRunEnded e) {
+  if (ProcessOf(e.Workflow) == null) { return; }
+  var how = e.How == WorkflowRunEnd.Completed ? ProcessStatus.Finished : e.How == WorkflowRunEnd.Cancelled ? ProcessStatus.Stopped : ProcessStatus.Failed;
+  FollowProcessRun(new ProcessLine { Run = e.Run, Workflow = e.Workflow, Item = e.Item, Starter = e.Starter, State = e.State, At = e.At }, how);
+}
+
+/// The one place where a run stands is written: the state the engine says it is in, when it came there, and — once —
+/// how it ended. The run's row is made here when the engine is the first to speak of it. Called by the three
+/// handlers above and by nothing else; nobody who is signed in may call it.
+[Server, Authorize(IsTheApp), OwnUnitOfWork]
+internal void FollowProcessRun(ProcessLine line, ProcessStatus standing) {
+  var at = line.At ?? DateTime.UtcNow;
+  var run = ProcessRun.FirstOrDefault(r => r.Run == line.Run);
+  if (run == null) {
+    // A line of the run's own, recorded in the same instant: the declared [Unique] settles who made the row.
+    try {
+      run = new ProcessRun { Run = line.Run, Workflow = line.Workflow, Item = line.Item, Starter = line.Starter, SeenAt = at };
+      UnitOfWork.Commit();
+    } catch (ValidationException e) {
+      UnitOfWork.Discard();
+      run = ProcessRun.Single(r => r.Run == line.Run);
+    }
+  }
+  var row = run!;
+  // A run that has ended stays ended, and an older word never overwrites a newer one.
+  if (row.Standing == ProcessStatus.Running) {
+    if (standing == ProcessStatus.Running) {
+      if (row.MovedAt == null || at >= row.MovedAt!) { row.State = line.State; row.MovedAt = at; }
+    } else {
+      if (line.State != "") { row.State = line.State; }
+      row.Standing = standing;
+      row.EndedAt = at;
+    }
+    row.ChangedAt = DateTime.UtcNow;
+  }
+  // The clock that asks which runs are stuck, made with the first run of a process that says how long is too long.
+  if (App.Setting<ProcessesSetup>().StuckCheckEvery > TimeSpan.Zero && ProcessOf(line.Workflow)!.StuckAfter != null && !ProcessWatch.Any()) {
+    new ProcessWatch();
+  }
+}
+
+// ── runs that are stuck ────────────────────────────────────────────────────────────────────────────────────────────
+
+/// ⭐ A RUN HAS BEEN WHERE IT IS FOR LONGER THAN ITS PROCESS ALLOWS (`Process.StuckAfter`). Raised once for each
+/// stay — when the run moves and gets stuck again, it is said again. Hear it to tell somebody:
+///
+///     [On] void TellTheOffice(ProcessStuck e) { Notify(OfficeLead(), "A run of " + e.Workflow + " has been at " + e.State + " since " + e.Since); }
+///
+/// The kit asks every `ProcessesSetup.StuckCheckEvery` (half an hour; zero: never, and nothing is raised).
+[Event("A process run is stuck")]
+public sealed class ProcessStuck {
+  /// The kit's row for the run — what `ProcessRunOf(e.Run.Id)` and the run's page take.
+  public ProcessRun Run;
+  public string Workflow = "";
+  /// The state it is stuck in, by name, and since when.
+  public string State = "";
+  public DateTime Since;
+  /// The id of the row the run is about.
+  public Guid? Item;
+}
+
+/// Whether the clock that asks runs. ⚠ Appended, never inserted.
+public enum ProcessWatchState {
+  [Label("Asking")] Watching,
+  [Label("Stopped")] Stopped,
+}
+
+/// The one row the clock runs on — made with the first run of a process that says how long is too long.
+public entity ProcessWatch {
+  ProcessWatchState State;
+  security {
+    allow read when FollowsProcesses;
+    allow create when IsAuthenticated;
+    deny create except via FollowProcessRun;
+  }
+}
+
+TimeSpan StuckCheckEvery() {
+  var every = App.Setting<ProcessesSetup>().StuckCheckEvery;
+  return every > TimeSpan.Zero ? every : TimeSpan.FromDays(36500);
+}
+
+/// Every `StuckCheckEvery`: the app is told of each run that got stuck since it was last asked.
+public workflow ProcessClock {
+  Tracks    = ProcessWatch.State;
+  Autostart = true;
+  Initial   = Watching;
+
+  event Stop();
+
+  state Watching {
+    subscribe Stop() as Stopping {
+      Finished {
+        Within = TimeSpan.FromDays(36500);
+        Remind Ask(After = StuckCheckEvery(), ThenEvery = StuckCheckEvery()) { TellOfStuckRuns(DurableClock.UtcNow); }
+        Unfinished { }
+      }
+    }
+    on Stopping() { goto Stopped; }
+  }
+  terminal cancel Stopped { }
+}
+
+/// ⭐ TELL THE APP OF EVERY RUN THAT IS STUCK AT `now` — a run that still runs and came to its state longer ago than
+/// its process allows — once for each stay: `ProcessStuck` is raised for each. Answers how many were told. The kit's
+/// own clock calls it; an app that turned the clock off (`StuckCheckEvery = TimeSpan.Zero`) may call it from its own.
+[Server, Authorize(IsTheApp)]
+public int TellOfStuckRuns(DateTime now) {
+  if (App.Setting<ProcessesSetup>().StuckCheckEvery <= TimeSpan.Zero && Workflow.Current?.Workflow == "ProcessClock") { return 0; }
+  var told = 0;
+  foreach (var process in App.Setting<ProcessesSetup>().Processes) {
+    if (process.StuckAfter == null) { continue; }
+    var before = now - process.StuckAfter!;
+    var name = process.Workflow;
+    var late = ProcessRun.Where(r => r.Workflow == name && r.Standing == ProcessStatus.Running && r.MovedAt != null && r.MovedAt < before)
+      .OrderBy(r => r.MovedAt).Take(500).ToList();
+    foreach (var run in late) {
+      if (run.StuckToldFor != null && run.StuckToldFor == run.MovedAt) { continue; }
+      run.StuckToldFor = run.MovedAt;
+      Raise(new ProcessStuck { Run = run, Workflow = run.Workflow, State = run.State, Since = run.MovedAt!, Item = run.Item });
+      told = told + 1;
+    }
+  }
+  return told;
+}
+
+/// Delete what the kit keeps of a run: its lines, and that it was seen. The workflow's own history is the engine's,
+/// and stays as long as the engine keeps runs.
+[Server, Authorize(ErasesProcessRecords)]
+public void ForgetProcessRun(ProcessRun run) {
+  foreach (var note in ProcessNote.Where(n => n.Run == run).ToList()) { note.Delete(); }
+  run.Delete();
+}

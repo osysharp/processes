@@ -1,0 +1,14 @@
+// The producer's test project for Osysharp.Processes — the programme office of a small film festival. A submitted
+// film gets a synopsis written by a model, is watched by a programmer, has its music cleared by the rights office —
+// a process of its own, started by the first — and is selected or declined. No model is ever called: its one model
+// is scripted.
+app Festival {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.Processes@1;
+  use Osysharp.Llm@2;
+  use Osysharp.Identity@0;
+  use Osysharp.Workflow;
+  use Osysharp.Diagrams@0;
+  use Osysharp.Ui;
+}

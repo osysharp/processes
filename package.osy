@@ -1,0 +1,43 @@
+// Osysharp.Processes — every run of a business process, findable and readable by somebody who was not there.
+//
+// A process is a workflow. The app says which of its workflows are processes — one class each, as agents and skills
+// are classes — and the kit lists their runs, draws where each one is, and tells what happened to it in order:
+//
+//     /// Taking a new supplier on.
+//     public class TakingOn : Process<Supplier> {
+//       public override string Name => "Supplier onboarding";
+//       public override string Workflow => "Onboarding";
+//       public override WorkflowGraph Graph => Onboarding.Graph;
+//       public override string TitleOf(Supplier s) => s.Name;
+//       public override List<WorkflowAuditEntry> HistoryOf(Supplier s) => Onboarding.For(s).Audit;
+//     }
+//     app.Processes = new ProcessesSetup { Processes = [new TakingOn()], RunPage = "/processes/{run}" };
+//
+//     ProcessRuns();                    // on a page: every run, filtered by process, state and what is stuck
+//     ProcessRunInspector(run);         // on a page: one run — the picture, each state it was in and for how long,
+//                                       // what happened there, what it cost against what it may
+//
+// ⚑ NOTHING IS WRITTEN IN THE WORKFLOW. A run is listed from the moment it starts — the kit hears the engine say
+//   so — and is followed to its end; what the process wants said of itself is a line: `Processes.Note("…")`.
+//   `[On] void H(ProcessStuck e)` hears of a run that has sat in one state longer than its process allows.
+//
+// ⚑ THE SCREENS READ AS WHOEVER IS LOOKING. `policy FollowsProcesses => IsOperations;` says who opens the list; a
+//   run's title and history are read through the app's own rules for the row the run is about, and a run whose row
+//   the reader may not read says so and shows nothing of it.
+package Osysharp.Processes {
+  version     "1.3.0";
+  minPlatform "0.14.0";
+  summary     "business processes as workflows the app names: every run listed and searched by process, state, age and what is stuck; one run drawn on a canvas with where it is and the path it took; each state it was in and for how long, what happened there in order — moves, claims, reminders, deadlines, the process's own notes and the steps other kits record; what the run has spent on models against the limit set for each run; and the runs it started.";
+
+  model "model/**/*.osy";
+  tests "tests";
+  // What a note on a run says can be about anybody.
+  personal Content;
+  // What a run spent on models, and the limit set for each run of a process.
+  use Osysharp.Llm@2;
+  use Osysharp.Identity@0;
+  use Osysharp.Workflow;
+  // The picture of a run.
+  use Osysharp.Diagrams@0;
+  use Osysharp.Ui;
+}

@@ -1,0 +1,135 @@
+// The list: every run of the app's processes, narrowed by process, by where runs stand and by what they are called.
+namespace Osysharp.Processes;
+
+using Osysharp.Ui;
+
+/// The tone a run's standing is shown in.
+Tone ToneOfStatus(ProcessStatus status) {
+  return status == ProcessStatus.Finished ? Tone.Success : status == ProcessStatus.Failed ? Tone.Danger : status == ProcessStatus.Stopped ? Tone.Ghost : Tone.Primary;
+}
+
+/// One run, as a line of the list.
+[Composable]
+public component ProcessRunLine(ProcessRunCard run, Action<Guid>? opened = null) {
+  action Open() { if (opened != null) { opened(run.Id); } }
+  render {
+    Row(gap: 4, px: 4, py: 3, align: Align.Start, wrap: Wrapping.Wrap, label: run.Readable ? run.Title : "A run that is not yours to see") {
+      Stack(gap: 1, grow: 1, minW: "min(100%, 16rem)") {
+        if (run.Readable && run.Href != "") { TextLink(run.Title == "" ? run.Process : run.Title, to: run.Href); }
+        if (run.Readable && run.Href == "") { Button(run.Title == "" ? run.Process : run.Title, onPress: Open, tone: Tone.Ghost, size: Size.Sm); }
+        if (!run.Readable) { Text("Not yours to see", fontSize: FontSize.Body, color: Colors.TextMuted); }
+        Text(run.Process + " · started " + run.Started, fontSize: FontSize.Caption, color: Colors.TextMuted);
+        if (run.Stuck) { Text(run.StuckWhy, fontSize: FontSize.Label, color: Colors.Danger.Text, lineHeight: "1.45", maxW: "56ch"); }
+      }
+      Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap) {
+        if (run.StateLabel != "") { Badge(run.StateLabel, tone: ToneOfStatus(run.Status)); }
+        if (run.Stuck) { Badge("Stuck", tone: Tone.Danger); }
+      }
+      Stack(gap: 1, minW: "7rem", align: Align.End) {
+        Text(run.Status == ProcessStatus.Running ? run.Age + " so far" : "ran " + run.Age, fontSize: FontSize.Label, color: Colors.TextSecondary);
+        if (run.Cost != "") { Text(run.Cost, fontSize: FontSize.Label, color: Colors.TextMuted, fontFamily: Font.Mono); }
+      }
+    }
+  }
+}
+
+/// Tells the list when a run starts, moves or ends, so it reads the runs again. It draws nothing.
+[Composable]
+component ProcessRunsWatch(Action<string> changed) {
+  live var known = ProcessRun.Count();
+  live var newest = ProcessRun.Where(r => r.ChangedAt != null).OrderByDescending(r => r.ChangedAt).Take(1).ToList();
+  live var stands = known.ToString() + " " + (newest.Count == 0 ? "" : newest[0].Id.ToString() + " " + newest[0].ChangedAt.ToString());
+  on change { changed(stands); }
+  render { }
+}
+
+/// ⭐ THE RUNS OF THE APP'S PROCESSES — newest first, with where each one is, how long it has run and what it has
+/// spent; narrowed by process, by what is running, stuck or ended, and by a word of the title.
+///
+///     [Route("/processes")] component ProcessesPage() { render { ProcessRuns(); } }
+///
+/// Each run opens on the page the app named (`ProcessesSetup.RunPage`); with none named, `opened` is told which.
+///
+/// In a test: `Ui.Click("Stuck")`, `Ui.Fill("Search runs", "salt")`, `Ui.Click("Salt Road")`.
+[Composable]
+public component ProcessRuns(Action<Guid>? opened = null) {
+  ProcessBoard? board = null;
+  bool loaded = false;
+  string problem = "";
+  string workflow = "";
+  string show = "";
+  string search = "";
+
+  action Load() {
+    try { board = ProcessRunsNow(new ProcessFilter { Workflow = workflow, Show = show }); problem = ""; }
+    catch (Exception ex) { problem = ex.Message; }
+    loaded = true;
+  }
+  on mount { Load(); }
+  // The list follows the runs: a run that starts, moves or ends is read again without the page being opened again
+  // (`ProcessRunsWatch`).
+  string shown = "";
+  action Follow(string now) {
+    if (now == shown) { return; }
+    var before = shown;
+    shown = now;
+    // The first word is what the page was opened on; every later one is news.
+    if (before != "") { Load(); }
+  }
+  action All() { show = ""; Load(); }
+  action Running() { show = "running"; Load(); }
+  action Stuck() { show = "stuck"; Load(); }
+  action Ended() { show = "ended"; Load(); }
+  action Of(string name) { workflow = name; Load(); }
+
+  render {
+    Stack(gap: 4, w: "100%", label: "Process runs") {
+      ProcessRunsWatch(Follow);
+      if (!loaded) {
+        Stack(gap: 3, label: "Loading the runs") { Skeleton(SkeletonShape.Control); Skeleton(SkeletonShape.Block); }
+      }
+      if (loaded && problem != "") { Alert("The runs could not be shown: " + problem, tone: Tone.Danger); }
+      if (board != null) {
+        Stack(gap: 3) {
+          Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap) {
+            Tabs {
+              Tab("All", selected: show == "", onPress: All);
+              Tab("Running", selected: show == "running", onPress: Running);
+              Tab("Stuck", selected: show == "stuck", onPress: Stuck);
+              Tab("Ended", selected: show == "ended", onPress: Ended);
+            }
+          }
+          Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap, label: "Which process") {
+            if (board.Processes.Count > 1) {
+              Button("Every process", onPress: () => Of(""), size: Size.Sm, tone: workflow == "" ? Tone.Primary : Tone.Ghost);
+              foreach (var p in board.Processes) {
+                Button(p.Name, onPress: () => Of(p.Workflow), size: Size.Sm, tone: workflow == p.Workflow ? Tone.Primary : Tone.Ghost);
+              }
+            }
+            Spacer();
+            Box(w: "min(100%, 18rem)") { SearchField("Search runs", value: search); }
+          }
+        }
+        if (board.Total == 0) {
+          EmptyState("No process has run yet", body: "A run is listed here from the moment it starts.");
+        }
+        if (board.Total > 0 && board.Runs.Count(r => Matches(r, search)) == 0) {
+          EmptyState("No run matches", body: "Nothing is " + (show == "" ? "listed" : show) + (search.Trim() == "" ? "" : " with \"" + search.Trim() + "\" in its name") + ".");
+        }
+        if (board.Runs.Count(r => Matches(r, search)) > 0) {
+          Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, label: "Runs") {
+            foreach (var r in board.Runs) {
+              if (Matches(r, search)) { ProcessRunLine(r, opened: opened); }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// Whether a run's line has `search` in what it is called.
+bool Matches(ProcessRunCard run, string search) {
+  var wanted = search.Trim().ToLower();
+  return wanted == "" || run.Title.ToLower().Contains(wanted) || run.Process.ToLower().Contains(wanted);
+}

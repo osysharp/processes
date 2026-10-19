@@ -1,0 +1,18 @@
+// The festival's model and its processes. In a file of its own with no `namespace`, because an `app.X = …`
+// statement's value is resolved outside the file's namespace.
+using Osysharp.Llm;
+using Osysharp.Processes;
+using Festival;
+
+app.Llm = new LlmSetup {
+  Models = [
+    new LlmModel { Name = "Small", Client = new ScriptedModel { Name = "Small" }, Model = "scripted-small",
+                   Price = new LlmPrice { Input = 1, Output = 5 }, MaxOutputTokens = 1000 },
+  ],
+  Default = "Small",
+};
+
+app.Processes = new ProcessesSetup {
+  Processes = [new FilmSubmission(), new MusicClearance(), new PrintShipping(), new CustomsClearance()],
+  RunPage = "/runs/{run}",
+};
