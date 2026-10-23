@@ -133,8 +133,8 @@ public component ProcessRunPicture(ProcessRunView view, bool tall = false) {
     Stack(gap: 2, w: "100%") {
       Box(h: tall ? TallPictureHeight(view) : "360px", w: "100%", bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden, label: "Where it is") {
         FlowCanvas(
-          nodes: view.States, edges: PictureTransitions(view), nodeTypes: StateTypes(), typeField: "Outcome",
-          sourceField: "From", targetField: "To", labelField: "Label", edgeLabelField: "Trigger",
+          nodes: view.States, edges: PictureTransitions(view), nodeTypes: StateTypes(), typeField: n => n.Outcome,
+          sourceField: e => e.From, targetField: e => e.To, labelField: n => n.Label, edgeLabelField: e => e.Trigger,
           readOnly: true, autoLayout: always, layoutDirection: tall ? "down" : "auto", background: none, controls: true,
           // The way the run went, in order; where it IS, only while it is running; where it failed, when it did.
           path: view.Stays.Select(s => s.State).ToList(),

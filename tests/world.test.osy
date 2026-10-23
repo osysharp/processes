@@ -7,7 +7,7 @@ using Osysharp.Workflow;
 using Osysharp.Processes;
 using Festival;
 
-[TestFixture]
+[TestFixture, DevSeed("A festival's programme office")]
 void Office() {
   var noor = new Person { Email = "noor@northlight.example", DisplayName = "Noor Haddad" };
   var idris = new Person { Email = "idris@northlight.example", DisplayName = "Idris Vale" };
