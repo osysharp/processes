@@ -179,7 +179,7 @@ public int RetellProcessLines(string subjectKind, Guid subject, string said) {
 
 /// The one place a run and a line about it are written. Answers the run's row. A line that says nothing records
 /// only that the run exists.
-[Server, Authorize(IsAuthenticated), OwnUnitOfWork]
+[Server, Authorize(IsAuthenticated), CommitsAlone]
 internal Guid RecordProcessNote(ProcessLine line) {
   var run = ProcessRun.FirstOrDefault(r => r.Run == line.Run);
   if (run == null) {
@@ -229,7 +229,7 @@ internal Guid RecordProcessNote(ProcessLine line) {
 /// The one place where a run stands is written: the state the engine says it is in, when it came there, and — once —
 /// how it ended. The run's row is made here when the engine is the first to speak of it. Called by the three
 /// handlers above and by nothing else; nobody who is signed in may call it.
-[Server, Authorize(IsTheApp), OwnUnitOfWork]
+[Server, Authorize(IsTheApp), CommitsAlone]
 internal void FollowProcessRun(ProcessLine line, ProcessStatus standing) {
   var at = line.At ?? DateTime.UtcNow;
   var run = ProcessRun.FirstOrDefault(r => r.Run == line.Run);
