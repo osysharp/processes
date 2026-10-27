@@ -109,3 +109,111 @@ osy test kits/processes/tests --pixels   # the same in a real browser, photograp
   `model/ui/Run.osy`
 - Uses `Osysharp.Workflow`, [`Osysharp.Diagrams`](../diagrams) (the picture), [`Osysharp.Llm`](../llm) (what a run
   spent), `Osysharp.Identity` and `Osysharp.Ui`.
+
+## Examples
+
+Taken from this package's own tests, which compile and run on every release.
+
+```osy
+using Osysharp.Identity;
+using Osysharp.Llm;
+using Osysharp.Workflow;
+using Osysharp.Processes;
+using Festival;
+
+[Test(Office)]
+void a_step_that_ends_badly_is_told_where_the_process_handled_it() {
+  TheModelWritesALine();
+  Guid film = Guid.Empty;
+  runas (Noor) {
+    film = Submitted("Glasshouse", "Bao Linh");
+    WatchedAndSettled(film, true);
+    RightsAnsweredAndSettled(film, false);
+  }
+  runas (Noor) {
+    var view = ProcessRunOf(RunOf(film).Id)!;
+    Assert.Equal(ProcessStatus.Stopped, view.Card.Status);
+    Assert.Equal("Declined", view.Card.StateLabel);
+    var clearing = view.Stays.Single(s => s.State == "Clearing");
+    Assert.Equal(["Asked the rights office to clear the music.", "The music could not be cleared."], clearing.Moments.Select(m => m.Said).ToList());
+    Assert.Equal(ProcessNoteTone.Problem, clearing.Moments.Last().Tone);
+    Assert.Equal(ProcessStatus.Stopped, view.Started.Single().Status);
+    Assert.Equal("The music could not be cleared: the rights holder said no", Film.Single(f => f.Id == film).Note);
+  }
+}
+```
+
+From [`tests/runs.test.osy`](tests/runs.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.Llm;
+using Osysharp.Workflow;
+using Osysharp.Processes;
+using Festival;
+
+[Test(Office)]
+void a_run_that_sits_too_long_is_stuck_and_the_list_finds_it() {
+  TestClock.Set(new DateTime(2031, 5, 5, 9, 0, 0, DateTimeKind.Utc));
+  TheModelWritesALine();
+  Guid old = Guid.Empty;
+  runas (Noor) { old = Submitted("Low Tide", "Mirela Costin"); }
+  TestClock.Advance(TimeSpan.FromDays(6));
+  runas (Noor) { Submitted("Paper Kites", "Jun Okada"); }
+
+  runas (Noor) {
+    var all = ProcessRunsNow(new ProcessFilter());
+    Assert.Equal(2, all.Total);
+    Assert.Equal(["Paper Kites", "Low Tide"], all.Runs.Select(r => r.Title).ToList());        // newest first
+    Assert.Equal(["Film submission", "Music clearance", "Print traffic", "Customs"], all.Processes.Select(p => p.Name).ToList());
+    var stuck = ProcessRunsNow(new ProcessFilter { Show = "stuck" });
+    Assert.Equal("Low Tide", stuck.Runs.Single().Title);
+    Assert.True(stuck.Runs.Single().Stuck);
+    Assert.Equal("It has been at Being watched for 6 days.", stuck.Runs.Single().StuckWhy);
+    Assert.Equal("6 days", stuck.Runs.Single().InState);
+  }
+}
+```
+
+From [`tests/runs.test.osy`](tests/runs.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.Llm;
+using Osysharp.Workflow;
+using Osysharp.Processes;
+using Festival;
+
+[Test(Office)]
+void the_list_is_narrowed_by_process_by_where_runs_stand_and_by_title() {
+  TheModelWritesALine();
+  runas (Noor) {
+    var salt = Submitted("Salt Road", "Ana Quiroga");
+    Submitted("Low Tide", "Mirela Costin");
+    var kites = Submitted("Paper Kites", "Jun Okada");
+    WatchedAndSettled(salt, true);
+    WatchedAndSettled(kites, false);
+  }
+  runas (Noor) {
+    Assert.Equal(4, ProcessRunsNow(new ProcessFilter()).Runs.Count);
+    Assert.Equal("Music of Salt Road", ProcessRunsNow(new ProcessFilter { Workflow = "MusicRights" }).Runs.Single().Title);
+    Assert.Equal("Paper Kites", ProcessRunsNow(new ProcessFilter { Show = "ended" }).Runs.Single().Title);
+    Assert.Equal(3, ProcessRunsNow(new ProcessFilter { Show = "running" }).Runs.Count);
+    Assert.Equal(["Music of Salt Road", "Salt Road"], ProcessRunsNow(new ProcessFilter { Search = "salt" }).Runs.Select(r => r.Title).OrderBy(t => t).ToList());
+    Assert.Equal(1, ProcessRunsNow(new ProcessFilter(), most: 1).Runs.Count);
+  }
+}
+```
+
+From [`tests/runs.test.osy`](tests/runs.test.osy).
+
+## Learn more
+
+- [The Osysharp.Processes reference](https://osysharp.com/reference/agent/kit-processes/)
+- [Osysharp.Processes in the package catalogue](https://osysharp.com/packages/#osysharp-processes)
+- [The Osy# reference](https://osysharp.com/reference/) — the language, the runtime and every kit
+- [`llms-full.txt`](https://osysharp.com/llms-full.txt) — the whole reference and specification as one Markdown file, for a coding agent
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).
