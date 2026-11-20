@@ -6,7 +6,7 @@ app Festival {
   model "model/**/*.osy";
   tests "**/*.test.osy";
   use Osysharp.Processes@1;
-  use Osysharp.Llm@2;
+  use Osysharp.Llm@3;
   use Osysharp.Identity@0;
   use Osysharp.Workflow;
   use Osysharp.Diagrams@0;
